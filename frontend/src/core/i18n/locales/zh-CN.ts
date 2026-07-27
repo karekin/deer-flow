@@ -164,6 +164,7 @@ export const zhCN: Translations = {
   sidebar: {
     newChat: "新对话",
     chats: "对话",
+    acceptanceRecords: "验收记录",
     channels: "渠道",
     recentChats: "最近的对话",
     demoChats: "演示对话",
@@ -248,6 +249,13 @@ export const zhCN: Translations = {
     loadOlderChats: "加载更早的对话",
   },
 
+  acceptanceRecords: {
+    title: "验收记录",
+    description: "集中保留内部测试与审计证据，不参与岗位记忆。",
+    search: "搜索验收记录",
+    empty: "暂无验收记录",
+  },
+
   // Channels
   channels: {
     title: "渠道",
@@ -285,6 +293,7 @@ export const zhCN: Translations = {
   pages: {
     appName: "DeerFlow",
     chats: "对话",
+    acceptanceRecords: "验收记录",
     newChat: "新对话",
     untitled: "未命名",
   },

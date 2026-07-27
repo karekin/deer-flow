@@ -3,6 +3,7 @@ import { expect, test } from "@rstest/core";
 
 import {
   channelSourceOfThread,
+  isInternalTestThread,
   pathOfThread,
   textOfMessage,
 } from "@/core/threads/utils";
@@ -85,6 +86,28 @@ test("ignores threads without valid IM channel source metadata", () => {
       },
     }),
   ).toBeNull();
+});
+
+test("hides explicitly internal acceptance threads", () => {
+  expect(
+    isInternalTestThread({
+      metadata: {
+        visibility: "internal_test",
+        purpose: "a-new-acceptance-flow",
+      },
+    }),
+  ).toBe(true);
+});
+
+test("hides legacy CloudMold acceptance threads without visibility metadata", () => {
+  expect(
+    isInternalTestThread({
+      metadata: { purpose: "cloudmold-r3-full-chain-e2e" },
+    }),
+  ).toBe(true);
+  expect(
+    isInternalTestThread({ metadata: { purpose: "operator-business-chat" } }),
+  ).toBe(false);
 });
 
 test("textOfMessage concatenates object and bare-string content parts", () => {

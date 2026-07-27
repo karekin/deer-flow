@@ -19,6 +19,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import { useInfiniteThreads } from "@/core/threads/hooks";
 import {
   channelSourceOfThread,
+  isInternalTestThread,
   pathOfThread,
   titleOfThread,
 } from "@/core/threads/utils";
@@ -33,7 +34,10 @@ export default function ChatsPage() {
     isFetchingNextPage,
   } = useInfiniteThreads();
   const threads = useMemo(
-    () => infiniteThreads?.pages.flat() ?? [],
+    () =>
+      (infiniteThreads?.pages.flat() ?? []).filter(
+        (thread) => !isInternalTestThread(thread),
+      ),
     [infiniteThreads],
   );
   const [search, setSearch] = useState("");

@@ -118,6 +118,32 @@ def normalize_input(raw_input: dict[str, Any] | None) -> dict[str, Any]:
 
 _DEFAULT_ASSISTANT_ID = "lead_agent"
 
+_LEGACY_INTERNAL_TEST_PURPOSES: frozenset[str] = frozenset(
+    {
+        "cloudmold-hsf-mcp-e2e",
+        "cloudmold-skill-task-e2e",
+        "cloudmold-r3-full-chain-e2e",
+        "cloudmold-role-agent-smoke",
+    }
+)
+
+
+def merge_run_metadata(
+    persisted_metadata: Mapping[str, Any] | None,
+    request_metadata: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Merge thread metadata into a run while keeping test classification sticky."""
+    merged: dict[str, Any] = {}
+    if persisted_metadata:
+        merged.update(persisted_metadata)
+    if request_metadata:
+        merged.update(request_metadata)
+    if persisted_metadata and persisted_metadata.get("visibility") == "internal_test":
+        merged["visibility"] = "internal_test"
+    if merged.get("purpose") in _LEGACY_INTERNAL_TEST_PURPOSES:
+        merged["visibility"] = "internal_test"
+    return merged
+
 
 # Whitelist of run-context keys that the langgraph-compat layer forwards from
 # ``body.context`` into the run config. ``config["context"]`` exists in
@@ -376,6 +402,7 @@ async def start_run(
         # Upsert thread metadata so the thread appears in /threads/search,
         # even for threads that were never explicitly created via POST /threads
         # (e.g. stateless runs).
+        persisted_thread_metadata: dict[str, Any] = {}
         try:
             existing = await run_ctx.thread_store.get(thread_id)
             if existing is None and owner_user_id:
@@ -391,6 +418,9 @@ async def start_run(
                     metadata=body.metadata,
                 )
             else:
+                existing_metadata = existing.get("metadata")
+                if isinstance(existing_metadata, Mapping):
+                    persisted_thread_metadata = dict(existing_metadata)
                 await run_ctx.thread_store.update_status(thread_id, "running")
         except Exception:
             logger.warning("Failed to upsert thread_meta for %s (non-fatal)", sanitize_log_param(thread_id))
@@ -401,7 +431,8 @@ async def start_run(
             graph_input = Command(resume=command["resume"])
         else:
             graph_input = normalize_input(body.input)
-        config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
+        effective_metadata = merge_run_metadata(persisted_thread_metadata, body.metadata)
+        config = build_run_config(thread_id, body.config, effective_metadata, assistant_id=body.assistant_id)
 
         # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
         # The ``context`` field is a custom extension for the langgraph-compat layer

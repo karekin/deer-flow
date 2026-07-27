@@ -39,6 +39,7 @@ class AgentConfig(BaseModel):
     """Configuration for a custom agent."""
 
     name: str
+    display_name: str | None = None
     description: str = ""
     model: str | None = None
     tool_groups: list[str] | None = None

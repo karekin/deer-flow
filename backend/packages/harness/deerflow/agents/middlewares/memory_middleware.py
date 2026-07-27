@@ -10,6 +10,7 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.memory.message_processing import detect_correction, detect_reinforcement, filter_messages_for_memory
 from deerflow.agents.memory.queue import get_memory_queue
+from deerflow.agents.memory.write_policy import should_write_memory
 from deerflow.config.memory_config import get_memory_config
 from deerflow.runtime.user_context import get_effective_user_id
 
@@ -64,10 +65,18 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
         if not config.enabled:
             return None
 
+        try:
+            run_config = get_config()
+        except RuntimeError:
+            run_config = None
+        if not should_write_memory(run_config):
+            logger.debug("Internal test run, skipping memory update")
+            return None
+
         # Get thread ID from runtime context first, then fall back to LangGraph's configurable metadata
         thread_id = runtime.context.get("thread_id") if runtime.context else None
         if thread_id is None:
-            config_data = get_config()
+            config_data = run_config or {}
             thread_id = config_data.get("configurable", {}).get("thread_id")
         if not thread_id:
             logger.debug("No thread_id in context, skipping memory update")

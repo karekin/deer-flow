@@ -335,6 +335,10 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
 See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions.
 
+#### Custom Agent Display Names
+
+Custom agents keep a stable hyphen-case `name` for routing and can optionally set a human-readable `display_name` for cards, chat headers, and welcome screens. For example, `name: cloudmold-inventory-control-agent` can be shown to operators as `display_name: 库控Agent` without changing existing chat routes or runtime identity.
+
 #### IM Channels
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
@@ -675,6 +679,8 @@ This is the difference between a chatbot with tool access and an agent with an a
 Most agents forget everything the moment a conversation ends. DeerFlow remembers.
 
 Across sessions, DeerFlow builds a persistent memory of your profile, preferences, and accumulated knowledge. The more you use it, the better it knows you — your writing style, your technical stack, your recurring workflows. Memory is stored locally and stays under your control.
+
+Threads classified with `metadata.visibility: internal_test` are retained as acceptance evidence but are excluded from long-term memory. Persisted test classification is inherited by later runs and cannot be downgraded by run metadata.
 
 Memory updates now skip duplicate fact entries at apply time, so repeated preferences and context do not accumulate endlessly across sessions.
 

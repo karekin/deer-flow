@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from langgraph.config import get_config
+
 from deerflow.agents.memory.message_processing import detect_correction, detect_reinforcement, filter_messages_for_memory
 from deerflow.agents.memory.queue import get_memory_queue
+from deerflow.agents.memory.write_policy import should_write_memory
 from deerflow.agents.middlewares.summarization_middleware import SummarizationEvent
 from deerflow.config.memory_config import get_memory_config
 from deerflow.runtime.user_context import resolve_runtime_user_id
@@ -12,6 +15,13 @@ from deerflow.runtime.user_context import resolve_runtime_user_id
 def memory_flush_hook(event: SummarizationEvent) -> None:
     """Flush messages about to be summarized into the memory queue."""
     if not get_memory_config().enabled or not event.thread_id:
+        return
+
+    try:
+        run_config = get_config()
+    except RuntimeError:
+        run_config = None
+    if not should_write_memory(run_config):
         return
 
     filtered_messages = filter_messages_for_memory(list(event.messages_to_summarize))

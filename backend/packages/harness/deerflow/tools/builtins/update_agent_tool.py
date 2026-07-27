@@ -86,6 +86,7 @@ OptionalStringList = Annotated[list[str] | None, BeforeValidator(_normalize_null
 def update_agent(
     runtime: Runtime,
     soul: OptionalText = None,
+    display_name: OptionalText = None,
     description: OptionalText = None,
     skills: OptionalStringList = None,
     tool_groups: OptionalStringList = None,
@@ -93,7 +94,7 @@ def update_agent(
 ) -> Command:
     """Persist updates to the current custom agent's SOUL.md and config.yaml.
 
-    Use this when the user asks to refine the agent's identity, description,
+    Use this when the user asks to refine the agent's identity, display name, description,
     skill whitelist, tool-group whitelist, or default model. Only the fields
     you explicitly pass are updated; omitted fields keep their existing values.
 
@@ -107,6 +108,7 @@ def update_agent(
 
     Args:
         soul: Optional full replacement SOUL.md content.
+        display_name: Optional human-readable name shown in the workspace UI.
         description: Optional new one-line description.
         skills: Optional skill whitelist. ``[]`` = no skills, omit = unchanged.
         tool_groups: Optional tool-group whitelist. ``[]`` = empty, omit = unchanged.
@@ -123,8 +125,8 @@ def update_agent(
     def _err(message: str) -> Command:
         return Command(update={"messages": [ToolMessage(content=f"Error: {message}", tool_call_id=tool_call_id, status="error")]})
 
-    if soul is None and description is None and skills is None and tool_groups is None and model is None:
-        return _err('No fields provided. Pass at least one of: soul, description, skills, tool_groups, model. Omit unchanged fields instead of passing null-like strings such as "null", "none", or "undefined".')
+    if soul is None and display_name is None and description is None and skills is None and tool_groups is None and model is None:
+        return _err('No fields provided. Pass at least one of: soul, display_name, description, skills, tool_groups, model. Omit unchanged fields instead of passing null-like strings such as "null", "none", or "undefined".')
 
     try:
         agent_name = validate_agent_name(agent_name_raw)
@@ -169,6 +171,12 @@ def update_agent(
     # Force the on-disk ``name`` to match the directory we are writing into,
     # even if ``existing_cfg.name`` had drifted (e.g. from manual yaml edits).
     config_data: dict[str, Any] = {"name": agent_name}
+    new_display_name = display_name if display_name is not None else existing_cfg.display_name
+    if new_display_name is not None:
+        config_data["display_name"] = new_display_name
+    if display_name is not None and display_name != existing_cfg.display_name:
+        updated_fields.append("display_name")
+
     new_description = description if description is not None else existing_cfg.description
     config_data["description"] = new_description
     if description is not None and description != existing_cfg.description:
@@ -192,7 +200,7 @@ def update_agent(
     if skills is not None and skills != existing_cfg.skills:
         updated_fields.append("skills")
 
-    config_changed = bool({"description", "model", "tool_groups", "skills"} & set(updated_fields))
+    config_changed = bool({"display_name", "description", "model", "tool_groups", "skills"} & set(updated_fields))
 
     # Stage every file we intend to rewrite into a temp sibling. Only after
     # *all* temp files exist do we rename them into place — so a failure on

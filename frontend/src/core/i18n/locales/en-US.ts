@@ -170,6 +170,7 @@ export const enUS: Translations = {
   sidebar: {
     newChat: "New chat",
     chats: "Chats",
+    acceptanceRecords: "Acceptance records",
     channels: "Channels",
     recentChats: "Recent chats",
     demoChats: "Demo chats",
@@ -260,6 +261,13 @@ export const enUS: Translations = {
     loadOlderChats: "Load older chats",
   },
 
+  acceptanceRecords: {
+    title: "Acceptance records",
+    description: "Internal test and audit evidence kept outside role memory.",
+    search: "Search acceptance records",
+    empty: "No acceptance records yet",
+  },
+
   // Channels
   channels: {
     title: "Channels",
@@ -297,6 +305,7 @@ export const enUS: Translations = {
   pages: {
     appName: "DeerFlow",
     chats: "Chats",
+    acceptanceRecords: "Acceptance records",
     newChat: "New chat",
     untitled: "Untitled",
   },

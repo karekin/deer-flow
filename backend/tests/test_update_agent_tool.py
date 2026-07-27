@@ -239,6 +239,16 @@ def test_update_agent_updates_description_only(tmp_path, patched_paths):
     assert "description" in result.update["messages"][0].content
 
 
+def test_update_agent_updates_display_name(tmp_path, patched_paths):
+    agent_dir = _seed_agent(tmp_path, description="inventory role")
+
+    result = update_agent.func(runtime=_runtime(), display_name="库控Agent")
+
+    cfg = yaml.safe_load((agent_dir / "config.yaml").read_text())
+    assert cfg["display_name"] == "库控Agent"
+    assert "display_name" in result.update["messages"][0].content
+
+
 def test_update_agent_skills_empty_list_disables_all(tmp_path, patched_paths):
     agent_dir = _seed_agent(tmp_path, skills=["a", "b"])
 
@@ -360,7 +370,7 @@ def test_update_agent_only_writes_under_current_user(tmp_path, patched_paths):
 
 def test_update_agent_round_trips_known_fields(tmp_path, patched_paths):
     """update_agent reads through load_agent_config so all fields the loader
-    knows about (name, description, model, tool_groups, skills) round-trip
+    knows about (name, display_name, description, model, tool_groups, skills) round-trip
     on a partial update.
 
     Note: ``load_agent_config`` strips unknown fields before constructing
@@ -369,7 +379,7 @@ def test_update_agent_round_trips_known_fields(tmp_path, patched_paths):
     """
     _seed_agent(tmp_path, description="legacy")
 
-    fake_cfg = AgentConfig(name="test-agent", description="legacy", skills=["s1"], tool_groups=["g1"], model="m1")
+    fake_cfg = AgentConfig(name="test-agent", display_name="库控Agent", description="legacy", skills=["s1"], tool_groups=["g1"], model="m1")
     fake_app_config = MagicMock()
     fake_app_config.get_model_config.return_value = object()
     with patch("deerflow.tools.builtins.update_agent_tool.load_agent_config", return_value=fake_cfg):
@@ -377,6 +387,7 @@ def test_update_agent_round_trips_known_fields(tmp_path, patched_paths):
             update_agent.func(runtime=_runtime(), description="bumped")
 
     cfg = yaml.safe_load((_user_agent_dir(tmp_path) / "config.yaml").read_text())
+    assert cfg["display_name"] == "库控Agent"
     assert cfg["description"] == "bumped"
     assert cfg["skills"] == ["s1"]
     assert cfg["tool_groups"] == ["g1"]

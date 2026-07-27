@@ -59,6 +59,26 @@ export function titleOfThread(thread: AgentThread) {
   return thread.values?.title ?? "Untitled";
 }
 
+const LEGACY_INTERNAL_TEST_PURPOSES = new Set([
+  "cloudmold-hsf-mcp-e2e",
+  "cloudmold-skill-task-e2e",
+  "cloudmold-r3-full-chain-e2e",
+  "cloudmold-role-agent-smoke",
+]);
+
+/** Keep machine-oriented acceptance evidence out of the operator chat list. */
+export function isInternalTestThread(
+  thread: Pick<AgentThread, "metadata">,
+) {
+  if (thread.metadata?.visibility === "internal_test") {
+    return true;
+  }
+  const purpose = thread.metadata?.purpose;
+  return (
+    typeof purpose === "string" && LEGACY_INTERNAL_TEST_PURPOSES.has(purpose)
+  );
+}
+
 const CHANNEL_PROVIDER_LABELS: Record<string, string> = {
   dingtalk: "DingTalk",
   discord: "Discord",

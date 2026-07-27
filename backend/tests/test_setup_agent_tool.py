@@ -33,13 +33,20 @@ def _make_paths_mock(tmp_path: Path):
     return paths
 
 
-def _call_setup_agent(tmp_path: Path, soul: str, description: str, agent_name: str = "test-agent"):
+def _call_setup_agent(
+    tmp_path: Path,
+    soul: str,
+    description: str,
+    agent_name: str = "test-agent",
+    display_name: str | None = None,
+):
     """Call the underlying setup_agent function directly, bypassing langchain tool wrapper."""
     with patch("deerflow.tools.builtins.setup_agent_tool.get_paths", return_value=_make_paths_mock(tmp_path)):
         return setup_agent.func(
             soul=soul,
             description=description,
             runtime=_make_runtime(agent_name),
+            display_name=display_name,
         )
 
 
@@ -128,6 +135,18 @@ class TestSetupAgentNoDataLoss:
         assert agent_dir.exists()
         assert (agent_dir / "SOUL.md").read_text() == "# My Agent"
         assert (agent_dir / "config.yaml").exists()
+
+    def test_setup_persists_display_name(self, tmp_path: Path):
+        """The workspace label is stored separately from the route-safe name."""
+        _call_setup_agent(
+            tmp_path,
+            soul="# Inventory Control",
+            description="Controls inventory risk",
+            display_name="库控Agent",
+        )
+
+        config_path = tmp_path / "users" / "test-user-autouse" / "agents" / "test-agent" / "config.yaml"
+        assert "display_name: 库控Agent" in config_path.read_text(encoding="utf-8")
 
     @pytest.mark.no_auto_user
     def test_runtime_user_id_used_when_contextvar_missing(self, tmp_path: Path):

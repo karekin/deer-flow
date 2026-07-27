@@ -78,6 +78,7 @@ class TestAgentConfig:
 
         cfg = AgentConfig(name="my-agent")
         assert cfg.name == "my-agent"
+        assert cfg.display_name is None
         assert cfg.description == ""
         assert cfg.model is None
         assert cfg.tool_groups is None
@@ -87,11 +88,13 @@ class TestAgentConfig:
 
         cfg = AgentConfig(
             name="code-reviewer",
+            display_name="Code Reviewer",
             description="Specialized for code review",
             model="deepseek-v3",
             tool_groups=["file:read", "bash"],
         )
         assert cfg.name == "code-reviewer"
+        assert cfg.display_name == "Code Reviewer"
         assert cfg.model == "deepseek-v3"
         assert cfg.tool_groups == ["file:read", "bash"]
 
@@ -506,6 +509,7 @@ class TestAgentsAPI:
     def test_create_agent(self, agent_client):
         payload = {
             "name": "code-reviewer",
+            "display_name": "代码评审 Agent",
             "description": "Reviews code",
             "soul": "You are a code reviewer.",
         }
@@ -513,6 +517,7 @@ class TestAgentsAPI:
         assert response.status_code == 201
         data = response.json()
         assert data["name"] == "code-reviewer"
+        assert data["display_name"] == "代码评审 Agent"
         assert data["description"] == "Reviews code"
         assert data["soul"] == "You are a code reviewer."
 
@@ -574,6 +579,17 @@ class TestAgentsAPI:
         response = agent_client.put("/api/agents/desc-agent", json={"description": "new desc"})
         assert response.status_code == 200
         assert response.json()["description"] == "new desc"
+
+    def test_update_agent_display_name(self, agent_client):
+        agent_client.post(
+            "/api/agents",
+            json={"name": "role-agent", "display_name": "旧名称", "soul": "p"},
+        )
+
+        response = agent_client.put("/api/agents/role-agent", json={"display_name": "库控Agent"})
+
+        assert response.status_code == 200
+        assert response.json()["display_name"] == "库控Agent"
 
     def test_update_missing_agent_404(self, agent_client):
         response = agent_client.put("/api/agents/ghost-agent", json={"soul": "new"})

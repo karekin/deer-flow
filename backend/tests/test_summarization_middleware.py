@@ -390,6 +390,29 @@ def test_memory_flush_hook_skips_when_thread_id_missing(monkeypatch: pytest.Monk
     queue.add_nowait.assert_not_called()
 
 
+def test_memory_flush_hook_skips_internal_test_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    queue = MagicMock()
+    monkeypatch.setattr("deerflow.agents.memory.summarization_hook.get_memory_config", lambda: MemoryConfig(enabled=True))
+    monkeypatch.setattr("deerflow.agents.memory.summarization_hook.get_memory_queue", lambda: queue)
+    monkeypatch.setattr(
+        "deerflow.agents.memory.summarization_hook.get_config",
+        lambda: {"metadata": {"visibility": "internal_test"}},
+        raising=False,
+    )
+
+    memory_flush_hook(
+        SummarizationEvent(
+            messages_to_summarize=tuple(_messages()[:2]),
+            preserved_messages=(),
+            thread_id="internal-test-thread",
+            agent_name="cloudmold-inventory-control-agent",
+            runtime=_runtime(),
+        )
+    )
+
+    queue.add_nowait.assert_not_called()
+
+
 def test_memory_flush_hook_enqueues_filtered_messages_and_flushes(monkeypatch: pytest.MonkeyPatch) -> None:
     queue = MagicMock()
     messages = [

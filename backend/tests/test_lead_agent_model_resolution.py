@@ -530,3 +530,49 @@ def test_memory_middleware_uses_explicit_memory_config_without_global_read(monke
     middleware = MemoryMiddleware(memory_config=MemoryConfig(enabled=False))
 
     assert middleware.after_agent({"messages": []}, runtime=MagicMock(context={"thread_id": "thread-1"})) is None
+
+
+def test_memory_middleware_skips_internal_test_thread(monkeypatch):
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from deerflow.agents.middlewares import memory_middleware as memory_middleware_module
+    from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+
+    queue = MagicMock()
+    monkeypatch.setattr(
+        memory_middleware_module,
+        "get_config",
+        lambda: {"metadata": {"visibility": "internal_test"}},
+    )
+    monkeypatch.setattr(memory_middleware_module, "get_memory_queue", lambda: queue)
+
+    middleware = MemoryMiddleware(memory_config=MemoryConfig(enabled=True))
+    middleware.after_agent(
+        {"messages": [HumanMessage(content="验收输入"), AIMessage(content="验收输出")]},
+        runtime=MagicMock(context={"thread_id": "internal-test-thread"}),
+    )
+
+    queue.add.assert_not_called()
+
+
+def test_memory_middleware_keeps_normal_business_memory(monkeypatch):
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from deerflow.agents.middlewares import memory_middleware as memory_middleware_module
+    from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+
+    queue = MagicMock()
+    monkeypatch.setattr(
+        memory_middleware_module,
+        "get_config",
+        lambda: {"metadata": {"visibility": "business"}},
+    )
+    monkeypatch.setattr(memory_middleware_module, "get_memory_queue", lambda: queue)
+
+    middleware = MemoryMiddleware(memory_config=MemoryConfig(enabled=True))
+    middleware.after_agent(
+        {"messages": [HumanMessage(content="业务输入"), AIMessage(content="业务输出")]},
+        runtime=MagicMock(context={"thread_id": "business-thread"}),
+    )
+
+    queue.add.assert_called_once()

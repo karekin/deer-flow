@@ -115,6 +115,7 @@ export interface Translations {
     recentChats: string;
     newChat: string;
     chats: string;
+    acceptanceRecords: string;
     demoChats: string;
     agents: string;
     channels: string;
@@ -191,6 +192,13 @@ export interface Translations {
     loadOlderChats: string;
   };
 
+  acceptanceRecords: {
+    title: string;
+    description: string;
+    search: string;
+    empty: string;
+  };
+
   // Channels
   channels: {
     title: string;
@@ -219,6 +227,7 @@ export interface Translations {
   pages: {
     appName: string;
     chats: string;
+    acceptanceRecords: string;
     newChat: string;
     untitled: string;
   };

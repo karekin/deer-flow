@@ -329,6 +329,9 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
    - `view_image` - Read image as base64 (added only if model supports vision)
    - `setup_agent` - Bootstrap-only: persist a brand-new custom agent's `SOUL.md` and `config.yaml`. Bound only when `is_bootstrap=True`.
    - `update_agent` - Custom-agent-only: persist self-updates to the current agent's `SOUL.md` / `config.yaml` from inside a normal chat (partial update + atomic write). Bound when `agent_name` is set and `is_bootstrap=False`.
+
+Custom-agent `config.yaml` supports an optional `display_name`. The stable hyphen-case `name` remains the runtime and route identifier, while the workspace uses `display_name` for the agent card, chat header, and welcome screen and falls back to `name` when it is absent or blank.
+
 4. **Subagent tool** (if enabled):
    - `task` - Delegate to subagent (description, prompt, subagent_type)
 
@@ -445,6 +448,7 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
 **Per-User Isolation**:
 - Memory is stored per-user at `{base_dir}/users/{user_id}/memory.json`
 - Per-agent per-user memory at `{base_dir}/users/{user_id}/agents/{agent_name}/memory.json`
+- Threads with persisted `metadata.visibility == "internal_test"` never enter either memory ingestion path (`MemoryMiddleware` or the pre-summarization flush hook). `start_run()` inherits thread metadata into run config and keeps the internal-test classification sticky so a run request cannot downgrade it.
 - Custom agent definitions (`SOUL.md` + `config.yaml`) are also per-user at `{base_dir}/users/{user_id}/agents/{agent_name}/`. The legacy shared layout `{base_dir}/agents/{agent_name}/` remains read-only fallback for unmigrated installations
 - `user_id` is resolved via `get_effective_user_id()` from `deerflow.runtime.user_context`
 - The `/api/memory*` endpoints resolve the owner through `_resolve_memory_user_id(request)`: trusted internal callers (IM channel workers carrying the `X-DeerFlow-Owner-User-Id` header, e.g. a bound `/memory` command) act for the connection owner; browser/API callers fall back to `get_effective_user_id()`. The header is only honored after `AuthMiddleware` validated the internal token, mirroring `get_trusted_internal_owner_user_id` used by the threads router

@@ -208,6 +208,48 @@ def test_build_run_config_with_overrides():
     assert config["metadata"]["user"] == "alice"
 
 
+def test_merge_run_metadata_inherits_persisted_thread_metadata():
+    """Run config must retain metadata stamped when the thread was created."""
+    from app.gateway.services import merge_run_metadata
+
+    metadata = merge_run_metadata(
+        {"visibility": "internal_test", "purpose": "cloudmold-role-agent-smoke"},
+        None,
+    )
+
+    assert metadata == {
+        "visibility": "internal_test",
+        "purpose": "cloudmold-role-agent-smoke",
+    }
+
+
+def test_merge_run_metadata_keeps_internal_test_visibility_sticky():
+    """A run cannot reclassify an acceptance thread as a business chat."""
+    from app.gateway.services import merge_run_metadata
+
+    metadata = merge_run_metadata(
+        {"visibility": "internal_test", "source": "thread"},
+        {"visibility": "business", "request_id": "request-1"},
+    )
+
+    assert metadata == {
+        "visibility": "internal_test",
+        "source": "thread",
+        "request_id": "request-1",
+    }
+
+
+def test_merge_run_metadata_normalizes_legacy_acceptance_purpose():
+    from app.gateway.services import merge_run_metadata
+
+    metadata = merge_run_metadata(
+        {"purpose": "cloudmold-r3-full-chain-e2e"},
+        None,
+    )
+
+    assert metadata["visibility"] == "internal_test"
+
+
 # ---------------------------------------------------------------------------
 # Regression tests for issue #1644:
 # assistant_id not mapped to agent_name → custom agent SOUL.md never loaded
@@ -588,6 +630,67 @@ async def _capture_start_run_graph_input(body):
         await record.task
 
     return captured["graph_input"]
+
+
+async def _capture_start_run_config(*, thread_metadata, run_metadata):
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    await thread_store.create("classified-thread", metadata=thread_metadata)
+    state = SimpleNamespace(
+        stream_bridge=SimpleNamespace(),
+        run_manager=RunManager(store=MemoryRunStore()),
+        checkpointer=InMemorySaver(),
+        store=InMemoryStore(),
+        run_event_store=SimpleNamespace(),
+        run_events_config=None,
+        thread_store=thread_store,
+    )
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(),
+        app=SimpleNamespace(state=state),
+    )
+    captured = {}
+
+    async def fake_run_agent(*args, **kwargs):
+        captured["config"] = kwargs["config"]
+
+    body = RunCreateRequest(
+        input={"messages": [{"role": "human", "content": "hi"}]},
+        metadata=run_metadata,
+    )
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+    ):
+        record = await start_run(body, "classified-thread", request)
+        await record.task
+    return captured["config"]
+
+
+def test_start_run_inherits_sticky_internal_test_metadata(_stub_app_config):
+    import asyncio
+
+    config = asyncio.run(
+        _capture_start_run_config(
+            thread_metadata={"visibility": "internal_test", "purpose": "acceptance"},
+            run_metadata={"visibility": "business"},
+        )
+    )
+
+    assert config["metadata"]["visibility"] == "internal_test"
+    assert config["metadata"]["purpose"] == "acceptance"
 
 
 def test_start_run_translates_resume_command_to_langgraph_command(_stub_app_config):

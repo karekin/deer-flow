@@ -58,6 +58,7 @@ import {
 import type { AgentThread, AgentThreadState } from "@/core/threads/types";
 import {
   channelSourceOfThread,
+  isInternalTestThread,
   pathOfThread,
   titleOfThread,
 } from "@/core/threads/utils";
@@ -82,7 +83,10 @@ export function RecentChatList() {
     isFetchingNextPage,
   } = useInfiniteThreads();
   const threads = useMemo(
-    () => infiniteThreads?.pages.flat() ?? [],
+    () =>
+      (infiniteThreads?.pages.flat() ?? []).filter(
+        (thread) => !isInternalTestThread(thread),
+      ),
     [infiniteThreads],
   );
 
