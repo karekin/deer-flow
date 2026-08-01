@@ -473,7 +473,66 @@ class TestListCustomAgents:
 
 
 # ===========================================================================
-# 7. Memory isolation: _get_memory_file_path
+# 7. Schedule-side helper used by workflow-steward install tests
+# ===========================================================================
+
+
+class _ScheduledTaskRepo:
+    def __init__(self) -> None:
+        self.created = []
+        self.updated = []
+        self.rows = {}
+
+    async def create(
+        self,
+        *,
+        task_id: str,
+        user_id: str,
+        thread_id: str | None,
+        context_mode: str,
+        assistant_id: str | None,
+        title: str,
+        prompt: str,
+        schedule_type: str,
+        schedule_spec: dict,
+        timezone: str,
+        next_run_at: object,
+    ) -> dict:
+        item = {
+            "id": task_id,
+            "user_id": user_id,
+            "thread_id": thread_id,
+            "context_mode": context_mode,
+            "assistant_id": assistant_id,
+            "title": title,
+            "prompt": prompt,
+            "schedule_type": schedule_type,
+            "schedule_spec": schedule_spec,
+            "timezone": timezone,
+            "next_run_at": next_run_at,
+            "status": "enabled",
+        }
+        self.rows[task_id] = item
+        self.created.append(item)
+        return item
+
+    async def get(self, task_id: str, *, user_id: str):
+        item = self.rows.get(task_id)
+        if item is None or item.get("user_id") != user_id:
+            return None
+        return item
+
+    async def update(self, task_id: str, *, user_id: str, updates: dict) -> dict:
+        item = self.rows.get(task_id)
+        if item is None or item.get("user_id") != user_id:
+            return None
+        item.update(updates)
+        self.updated.append((task_id, updates))
+        return item
+
+
+# ===========================================================================
+# 8. Memory isolation: _get_memory_file_path
 # ===========================================================================
 
 
@@ -595,6 +654,75 @@ class TestAgentsAPI:
 
         installed = agent_client.get("/api/agent-templates").json()[0]
         assert installed["installed"] is True
+
+    def test_install_workflow_steward_template_reconciles_autopilot_tasks(self, agent_client, monkeypatch):
+        import app.gateway.routers.agents as agents_router
+
+        repo = _ScheduledTaskRepo()
+        old_repo = agents_router.get_scheduled_task_repo
+        monkeypatch.setenv("CLOUDMOLD_WORKFLOW_STEWARD_TARGET_WORKFLOW_IDS", "wf-order, wf-stock")
+        monkeypatch.setenv("CLOUDMOLD_WORKFLOW_STEWARD_DAILY_CRON", "15 1 * * *")
+        monkeypatch.setenv("CLOUDMOLD_WORKFLOW_STEWARD_WEEKLY_CRON", "30 2 * * 1")
+        try:
+            monkeypatch.setattr(agents_router, "get_scheduled_task_repo", lambda _request: repo)
+            response = agent_client.post("/api/agent-templates/workflow-steward/install")
+        finally:
+            monkeypatch.setattr(agents_router, "get_scheduled_task_repo", old_repo)
+
+        assert response.status_code == 201
+        assert len(repo.created) == 2
+        task_ids = {item["id"] for item in repo.created}
+        assert agents_router._WORKFLOW_STEWARD_DAILY_TASK_ID in task_ids
+        assert agents_router._WORKFLOW_STEWARD_WEEKLY_TASK_ID in task_ids
+        assert any("wf-order" in task["prompt"] for task in repo.created)
+        assert any("wf-stock" in task["prompt"] for task in repo.created)
+
+    def test_install_workflow_steward_template_keeps_tasks_in_sync_when_already_installed(self, agent_client, monkeypatch):
+        import app.gateway.routers.agents as agents_router
+
+        repo = _ScheduledTaskRepo()
+        repo.rows[agents_router._WORKFLOW_STEWARD_DAILY_TASK_ID] = {
+            "id": agents_router._WORKFLOW_STEWARD_DAILY_TASK_ID,
+            "user_id": "test-user-autouse",
+            "context_mode": "fresh_thread_per_run",
+            "assistant_id": "workflow-steward",
+            "title": "old title",
+            "prompt": "old",
+            "schedule_type": "cron",
+            "schedule_spec": {"cron": "15 1 * * *"},
+            "timezone": "Asia/Shanghai",
+            "status": "enabled",
+            "thread_id": None,
+            "next_run_at": None,
+        }
+        repo.rows[agents_router._WORKFLOW_STEWARD_WEEKLY_TASK_ID] = {
+            "id": agents_router._WORKFLOW_STEWARD_WEEKLY_TASK_ID,
+            "user_id": "test-user-autouse",
+            "context_mode": "fresh_thread_per_run",
+            "assistant_id": "workflow-steward",
+            "title": "old title",
+            "prompt": "old",
+            "schedule_type": "cron",
+            "schedule_spec": {"cron": "15 2 * * 1"},
+            "timezone": "Asia/Shanghai",
+            "status": "enabled",
+            "thread_id": None,
+            "next_run_at": None,
+        }
+        old_repo = agents_router.get_scheduled_task_repo
+        monkeypatch.setenv("CLOUDMOLD_WORKFLOW_STEWARD_DAILY_CRON", "15 1 * * *")
+        monkeypatch.setenv("CLOUDMOLD_WORKFLOW_STEWARD_WEEKLY_CRON", "30 2 * * 1")
+        try:
+            monkeypatch.setattr(agents_router, "get_scheduled_task_repo", lambda _request: repo)
+            first = agent_client.post("/api/agent-templates/workflow-steward/install")
+            second = agent_client.post("/api/agent-templates/workflow-steward/install")
+        finally:
+            monkeypatch.setattr(agents_router, "get_scheduled_task_repo", old_repo)
+
+        assert first.status_code == 201
+        assert second.status_code == 409
+        assert any("old title" not in (update[1].get("title", "")) for update in repo.updated)
+        assert any(update[1].get("schedule_spec") == {"cron": "30 2 * * 1"} for update in repo.updated)
 
     def test_install_workflow_steward_template_is_idempotency_safe(self, agent_client):
         assert agent_client.post("/api/agent-templates/workflow-steward/install").status_code == 201
