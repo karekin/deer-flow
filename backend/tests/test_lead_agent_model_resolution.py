@@ -1243,7 +1243,12 @@ def test_custom_agent_exact_tool_allowlist_filters_configured_and_mcp_tools(monk
         return "forbidden"
 
     agent_config = _make_agent_config(
-        allowed_tools=["allowed_external_tool", "workflow_manage"],
+        allowed_tools=[
+            "allowed_external_tool",
+            "workflow_manage",
+            "workflow_definition_get",
+            "workflow_observation_get",
+        ],
         skills=["workflow-steward"],
     )
     import deerflow.skills.describe as skill_describe_module
@@ -1276,6 +1281,8 @@ def test_custom_agent_exact_tool_allowlist_filters_configured_and_mcp_tools(monk
     names = {candidate.name for candidate in result["tools"]}
     assert "allowed_external_tool" in names
     assert "workflow_manage" in names
+    assert "workflow_definition_get" in names
+    assert "workflow_observation_get" in names
     assert "forbidden_external_tool" not in names
     assert "forbidden_late_tool" not in names
     assert "update_agent" not in names

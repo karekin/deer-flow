@@ -3,6 +3,8 @@ name: workflow-steward
 description: Maintains E1 CloudMold workflow drafts from supplied redacted behavior, telemetry, logs, outcomes, feedback, and governed web evidence. Use for diagnosis, hash-pinned JSON Patch proposals, local static preflight, external-review bundles, and proactive process-improvement reports.
 allowed-tools:
   - describe_skill
+  - workflow_definition_get
+  - workflow_observation_get
   - workflow_manage
   - web_search
   - web_fetch
@@ -23,7 +25,7 @@ Maintain deterministic workflow JSON through the governed evolution plane. Do no
 
 ## Evidence Intake
 
-Start with the smallest relevant, redacted evidence window supplied by the user or a connected CloudMold service. The current E1 template has no direct system-log or business-data query authority. If evidence is not supplied, report the missing source instead of inventing or directly accessing it. Keep these sources distinct:
+Start with the smallest relevant, redacted evidence window supplied by the user or a connected CloudMold service. When configured, `workflow_observation_get` may read tenant-scoped durable managed-run outcomes and governed model-invocation observations from fixed CloudMold endpoints. For `managed_runs`, supply the SkillTask `skill_id`; for `model_observations`, supply the distinct AI Operations `model_workflow_id`. Never substitute one namespace for the other. The tool does not provide arbitrary system-log, user-behavior, KPI, or business-data query authority. If required evidence is unavailable, report the missing source instead of inventing or directly accessing it. Keep these sources distinct:
 
 1. User behavior: repeated edits, skipped steps, rejection, takeover, abandonment, and feedback.
 2. Runtime behavior: failures, retries, timeouts, compensation, lease takeover, waits, duplicate calls, latency, and cost.
@@ -36,10 +38,10 @@ Do not diagnose from raw PII, secrets, cross-tenant records, an unknown denomina
 
 ## Evolution Workflow
 
-1. **Observe** — inspect the bounded evidence supplied to the run and, when useful, gather governed web evidence. Do not claim direct access to CloudMold logs or behavior data.
+1. **Observe** — inspect the bounded evidence supplied to the run, use `workflow_observation_get` for configured managed-run/model observations, and, when useful, gather governed web evidence. Do not claim access to CloudMold sources the tool did not return.
 2. **Frame the problem** — state reproduction conditions, affected business objects, baseline, severity, confidence, evidence completeness, candidate root causes, and expiry.
 3. **Design** — declare one primary objective, business and technical guardrails, minimum sample, observation window, allowed variance, and explicit rollback conditions.
-4. **Import** — use `workflow_manage(import_active)` only with the definition and fresh attestation returned by the trusted CloudMold Registry integration.
+4. **Import** — use `workflow_definition_get` to retrieve the exact immutable version, then pass its definition and fresh attestation unchanged to `workflow_manage(import_active)`.
 5. **Draft** — create the hash-pinned draft and apply field-level JSON Patch operations with `workflow_manage`. Never upload a root replacement or edit output files around the tool.
 6. **Preflight** — run `workflow_manage(validate)`. Treat its result as local static preflight only; capability registration, closure, replay, shadow, approvals, release, and rollback remain external verdicts.
 7. **Package** — call `workflow_manage(create_proposal)` with evidence references, hypothesis, expected benefit, guardrails, sample, window, rollback conditions, and a risk no lower than the server-derived minimum.

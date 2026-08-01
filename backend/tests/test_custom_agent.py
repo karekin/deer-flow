@@ -587,6 +587,8 @@ class TestAgentsAPI:
         assert config["skills"] == ["workflow-steward"]
         assert "describe_skill" in config["allowed_tools"]
         assert "workflow_manage" in config["allowed_tools"]
+        assert "workflow_definition_get" in config["allowed_tools"]
+        assert "workflow_observation_get" in config["allowed_tools"]
         assert "workflow_release_request" not in config["allowed_tools"]
 
         installed = agent_client.get("/api/agent-templates").json()[0]
@@ -806,7 +808,9 @@ class TestAgentsAPI:
             "tool_groups": ["file:read", "bash"],
             "soul": "You are specialized.",
         }
-        response = agent_client.post("/api/agents", json=payload)
+        with patch("app.gateway.routers.agents.get_app_config") as get_app_config:
+            get_app_config.return_value.get_model_config.return_value = object()
+            response = agent_client.post("/api/agents", json=payload)
         assert response.status_code == 201
         data = response.json()
         assert data["model"] == "deepseek-v3"
