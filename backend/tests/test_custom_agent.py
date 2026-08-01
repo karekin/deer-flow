@@ -589,6 +589,8 @@ class TestAgentsAPI:
         assert "workflow_manage" in config["allowed_tools"]
         assert "workflow_definition_get" in config["allowed_tools"]
         assert "workflow_observation_get" in config["allowed_tools"]
+        assert "workflow_proposal_status" in config["allowed_tools"]
+        assert "workflow_proposal_submit" in config["allowed_tools"]
         assert "workflow_release_request" not in config["allowed_tools"]
 
         installed = agent_client.get("/api/agent-templates").json()[0]

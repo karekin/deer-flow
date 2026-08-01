@@ -6,6 +6,8 @@ allowed-tools:
   - workflow_definition_get
   - workflow_observation_get
   - workflow_manage
+  - workflow_proposal_status
+  - workflow_proposal_submit
   - web_search
   - web_fetch
 ---
@@ -45,9 +47,10 @@ Do not diagnose from raw PII, secrets, cross-tenant records, an unknown denomina
 5. **Draft** — create the hash-pinned draft and apply field-level JSON Patch operations with `workflow_manage`. Never upload a root replacement or edit output files around the tool.
 6. **Preflight** — run `workflow_manage(validate)`. Treat its result as local static preflight only; capability registration, closure, replay, shadow, approvals, release, and rollback remain external verdicts.
 7. **Package** — call `workflow_manage(create_proposal)` with evidence references, hypothesis, expected benefit, guardrails, sample, window, rollback conditions, and a risk no lower than the server-derived minimum.
-8. **Report** — proactively explain the problem, evidence window, impact, temporary mitigation, proposed change, expected benefit, risk, current E1 state, missing external validation, and required user decision.
+8. **Submit candidate** — call `workflow_proposal_status` to obtain the current CAS pointer version, then `workflow_proposal_submit` with the immutable local proposal ID. A successful submission means only that CloudMold registered a candidate; it is not validation, approval, release, or activation.
+9. **Report** — proactively explain the problem, evidence window, impact, temporary mitigation, proposed change, expected benefit, risk, candidate state, missing external validation, and required user decision.
 
-Tool submission is not proof of external validation or release. The current managed template stops at a local review bundle.
+Tool submission is not proof of external validation or release. The current managed template stops at a CloudMold candidate registration and cannot promote its own proposal.
 
 When the CloudMold proposal API is unavailable or before submitting to it, use `workflow_manage` only as the E1 local draft plane: import the server-returned active definition together with its fresh registry attestation, create a hash-pinned draft, apply field-level JSON Patch, run the local static preflight, and package a review bundle. Never fabricate or edit the attestation. The service verifies that its signature binds the workflow, owner, version, definition hash, and issue time, and rejects stale or backward imports. `workflow_manage` cannot activate, release, or roll back an execution definition; its `READY_FOR_REVIEW` result means only that local preflight passed. The proposal risk may exceed, but cannot fall below, the server-derived minimum.
 

@@ -737,12 +737,27 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             from deerflow.tools.workflow_manage_tool import workflow_manage
 
             raw_tools.append(workflow_manage)
-        workflow_read_tool_names = {"workflow_definition_get", "workflow_observation_get"}
-        if allowed_tool_names & workflow_read_tool_names:
-            from deerflow.tools.cloudmold_workflow_tools import workflow_definition_get, workflow_observation_get
+        workflow_registry_tool_names = {
+            "workflow_definition_get",
+            "workflow_observation_get",
+            "workflow_proposal_status",
+            "workflow_proposal_submit",
+        }
+        if allowed_tool_names & workflow_registry_tool_names:
+            from deerflow.tools.cloudmold_workflow_tools import (
+                workflow_definition_get,
+                workflow_observation_get,
+                workflow_proposal_status,
+                workflow_proposal_submit,
+            )
 
-            workflow_read_tools = (workflow_definition_get, workflow_observation_get)
-            raw_tools.extend(tool for tool in workflow_read_tools if tool.name in allowed_tool_names)
+            workflow_registry_tools = (
+                workflow_definition_get,
+                workflow_observation_get,
+                workflow_proposal_status,
+                workflow_proposal_submit,
+            )
+            raw_tools.extend(tool for tool in workflow_registry_tools if tool.name in allowed_tool_names)
     configured_tools = raw_tools + extra_tools
     if agent_config and agent_config.allowed_tools is not None:
         configured_tools = [tool for tool in configured_tools if tool.name in allowed_tool_names]

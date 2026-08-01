@@ -1248,6 +1248,8 @@ def test_custom_agent_exact_tool_allowlist_filters_configured_and_mcp_tools(monk
             "workflow_manage",
             "workflow_definition_get",
             "workflow_observation_get",
+            "workflow_proposal_status",
+            "workflow_proposal_submit",
         ],
         skills=["workflow-steward"],
     )
@@ -1283,6 +1285,8 @@ def test_custom_agent_exact_tool_allowlist_filters_configured_and_mcp_tools(monk
     assert "workflow_manage" in names
     assert "workflow_definition_get" in names
     assert "workflow_observation_get" in names
+    assert "workflow_proposal_status" in names
+    assert "workflow_proposal_submit" in names
     assert "forbidden_external_tool" not in names
     assert "forbidden_late_tool" not in names
     assert "update_agent" not in names

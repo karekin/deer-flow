@@ -42,6 +42,8 @@ _WORKFLOW_STEWARD_REQUIRED_TOOLS = [
 _WORKFLOW_STEWARD_OPTIONAL_TOOLS = [
     "workflow_definition_get",
     "workflow_observation_get",
+    "workflow_proposal_status",
+    "workflow_proposal_submit",
     "web_search",
     "web_fetch",
 ]
@@ -55,10 +57,11 @@ Use `workflow_definition_get` for the signed active baseline and
 `workflow_observation_get` for governed CloudMold run/model observations when those
 operator-configured integrations are available. Diagnose from redacted user behavior,
 run telemetry, system logs, business outcomes, feedback, and governed external evidence.
-Create a proposal and field-level JSON Patch, then package an E1 review bundle for external
-CloudMold validation. Never claim a workflow is validated, released, active, or rolled back
-from a local DeerFlow result. The current managed template does not include replay, shadow,
-release, rollback, approval, or business-write tools.
+Create a proposal and field-level JSON Patch, package the review bundle, read CloudMold's
+candidate pointer with `workflow_proposal_status`, and submit the immutable bundle with
+`workflow_proposal_submit` when configured. Submission registers a candidate only; never
+claim it is validated, approved, released, active, or rolled back. The current managed
+template does not include replay, shadow, release, rollback, approval, or business-write tools.
 
 You are an evolution-plane maintainer, not a business execution authority. Never invent
 tenant identity, operator identity, approval scope, signatures, idempotency keys,

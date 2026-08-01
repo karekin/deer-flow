@@ -138,6 +138,39 @@ async def test_workflow_manage_builds_hash_pinned_review_bundle(tmp_path: Path):
     active_file = tmp_path / "outputs" / "workflow-steward" / "stockout-diagnosis" / "active" / active_sha / "skill-task.json"
     assert json.loads(active_file.read_text())["skill_version"] == "1.0.0"
 
+    submission = module.load_proposal_for_submission(
+        _runtime(),
+        "stockout-diagnosis",
+        packaged["proposal"]["proposal_id"],
+    )
+    assert submission["base_definition"]["skill_version"] == "1.0.0"
+    assert submission["candidate_definition"]["skill_version"] == "1.0.1"
+    assert submission["proposal"] == packaged["proposal"]
+    assert submission["validation"]["passed"] is True
+
+
+@pytest.mark.asyncio
+async def test_proposal_submission_loader_rejects_tampered_candidate(tmp_path: Path):
+    imported = await _call("import_active", definition=_definition())
+    draft = await _call("create_draft", base_sha256=imported["active_import"]["sha256"])
+    patched = await _call(
+        "apply_patch",
+        expected_draft_sha256=draft["draft"]["draft_sha256"],
+        patch=[{"op": "replace", "path": "/skill_version", "value": "1.0.1"}],
+    )
+    await _call("validate", expected_draft_sha256=patched["draft"]["draft_sha256"])
+    packaged = await _call(
+        "create_proposal",
+        expected_draft_sha256=patched["draft"]["draft_sha256"],
+        proposal=_proposal(),
+    )
+    proposal_id = packaged["proposal"]["proposal_id"]
+    candidate_path = tmp_path / "outputs" / "workflow-steward" / "stockout-diagnosis" / "proposals" / proposal_id / "skill-task.json"
+    candidate_path.write_text("{}")
+
+    with pytest.raises(ValueError, match="candidate hash"):
+        module.load_proposal_for_submission(_runtime(), "stockout-diagnosis", proposal_id)
+
 
 @pytest.mark.asyncio
 async def test_workflow_manage_rejects_root_replacement_and_stale_hash():

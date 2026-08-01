@@ -368,6 +368,42 @@ def _summary(root: Path) -> dict[str, Any]:
     }
 
 
+def load_proposal_for_submission(runtime: Runtime, workflow_id: str, proposal_id: str) -> dict[str, Any]:
+    """Load an immutable local review bundle and re-verify every hash boundary."""
+    root, _owner_user_id = _workflow_root(runtime, workflow_id)
+    if not isinstance(proposal_id, str) or not re.fullmatch(r"proposal-[0-9a-f]{16}", proposal_id):
+        raise ValueError("proposal_id must use the managed proposal hash identifier")
+    proposal_root = root / "proposals" / proposal_id
+    proposal_path = proposal_root / "proposal.json"
+    candidate_path = proposal_root / "skill-task.json"
+    validation_path = proposal_root / "validation.json"
+    if not proposal_path.exists() or not candidate_path.exists() or not validation_path.exists():
+        raise ValueError("Managed proposal bundle is incomplete or does not exist")
+
+    proposal = _read_json(proposal_path)
+    candidate = _read_json(candidate_path)
+    validation = _read_json(validation_path)
+    base_sha = proposal.get("base_sha256")
+    candidate_sha = proposal.get("candidate_sha256")
+    if proposal.get("proposal_id") != proposal_id or proposal.get("workflow_id") != workflow_id:
+        raise ValueError("Managed proposal identity does not match its artifact namespace")
+    if proposal.get("status") != "READY_FOR_EXTERNAL_VALIDATION":
+        raise ValueError("Managed proposal is not ready for external validation")
+    if not isinstance(base_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", base_sha):
+        raise ValueError("Managed proposal base hash is invalid")
+    if _sha256(candidate) != candidate_sha or proposal_id != f"proposal-{str(candidate_sha)[:16]}":
+        raise ValueError("Managed proposal candidate hash does not match its immutable artifact")
+    base = _read_active_snapshot(root, base_sha)
+    if validation.get("passed") is not True or validation.get("base_sha256") != base_sha or validation.get("draft_sha256") != candidate_sha:
+        raise ValueError("Managed proposal validation does not match the immutable definitions")
+    return {
+        "proposal": proposal,
+        "base_definition": base,
+        "candidate_definition": candidate,
+        "validation": validation,
+    }
+
+
 def _manage_locked_sync(
     runtime: Runtime,
     action: str,

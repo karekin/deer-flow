@@ -1,7 +1,8 @@
-"""Trusted read-only CloudMold inputs for the managed Workflow Steward."""
+"""Trusted CloudMold registry inputs and candidate handoff for Workflow Steward."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -13,7 +14,12 @@ from langchain.tools import tool
 
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.types import Runtime
-from deerflow.tools.workflow_manage_tool import _canonical_bytes, _sha256, _verify_active_attestation
+from deerflow.tools.workflow_manage_tool import (
+    _canonical_bytes,
+    _sha256,
+    _verify_active_attestation,
+    load_proposal_for_submission,
+)
 
 _WORKFLOW_STEWARD_AGENT_NAME = "workflow-steward"
 _BASE_URL_ENV = "CLOUDMOLD_WORKFLOW_REGISTRY_BASE_URL"
@@ -81,7 +87,9 @@ async def _request_cloudmold(
     path: str,
     *,
     deerflow_user_id: str,
+    method: Literal["GET", "POST"] = "GET",
     params: dict[str, Any] | None = None,
+    json_body: dict[str, Any] | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> tuple[Any, str]:
     base_url, token, token_subject, timeout = _connection_config(deerflow_user_id)
@@ -100,7 +108,7 @@ async def _request_cloudmold(
             subject = _unwrap_cloudmold_response(subject_response)
             if not isinstance(subject, dict) or subject.get("owner_user_id") != token_subject:
                 raise ValueError("CloudMold bearer token is not authenticated as the configured CloudMold subject")
-            response = await client.get(path, params=params)
+            response = await client.request(method, path, params=params, json=json_body)
     except httpx.HTTPError as exc:
         raise ValueError("CloudMold registry request failed") from exc
 
@@ -207,6 +215,96 @@ async def _get_observations(
     }
 
 
+async def _get_proposal_registry_status(
+    *,
+    runtime: Runtime,
+    workflow_id: str,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> dict[str, Any]:
+    deerflow_user_id = _require_steward(runtime)
+    workflow_id = _require_safe_id(workflow_id, "workflow_id")
+    data, _cloudmold_subject = await _request_cloudmold(
+        f"/cloudmold/ai-operations/workflow-registry/workflows/{workflow_id}",
+        deerflow_user_id=deerflow_user_id,
+        transport=transport,
+    )
+    if not isinstance(data, dict):
+        raise ValueError("CloudMold proposal registry status must be an object")
+    return data
+
+
+_get_workflow_registry_status = _get_proposal_registry_status
+
+
+async def _submit_proposal(
+    *,
+    runtime: Runtime,
+    workflow_id: str,
+    proposal_id: str,
+    expected_pointer_version: int,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> dict[str, Any]:
+    deerflow_user_id = _require_steward(runtime)
+    workflow_id = _require_safe_id(workflow_id, "workflow_id")
+    if not isinstance(expected_pointer_version, int) or expected_pointer_version < 0:
+        raise ValueError("expected_pointer_version must be a non-negative integer")
+    bundle = await asyncio.to_thread(load_proposal_for_submission, runtime, workflow_id, proposal_id)
+    data, _cloudmold_subject = await _request_cloudmold(
+        "/cloudmold/ai-operations/workflow-registry/proposals",
+        deerflow_user_id=deerflow_user_id,
+        method="POST",
+        json_body={"expected_pointer_version": expected_pointer_version, **bundle},
+        transport=transport,
+    )
+    if not isinstance(data, dict):
+        raise ValueError("CloudMold proposal submission result must be an object")
+    return data
+
+
+async def _submit_workflow_proposal(
+    *,
+    runtime: Runtime,
+    workflow_id: str,
+    proposal_id: str,
+    expected_pointer_version: int | None = None,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> dict[str, Any]:
+    if expected_pointer_version is None:
+        try:
+            registry = await _get_proposal_registry_status(
+                runtime=runtime,
+                workflow_id=workflow_id,
+                transport=transport,
+            )
+        except ValueError as exc:
+            if "HTTP 404" not in str(exc):
+                raise
+            pointer_version = 0
+        else:
+            pointer_version = registry.get("pointer_version")
+            if pointer_version in {None, ""}:
+                pointer_version = 0
+            if not isinstance(pointer_version, int) or pointer_version < 0:
+                raise ValueError("CloudMold proposal registry did not return a valid pointer_version")
+    else:
+        if not isinstance(expected_pointer_version, int) or expected_pointer_version < 0:
+            raise ValueError("expected_pointer_version must be a non-negative integer")
+        pointer_version = expected_pointer_version
+    submitted = await _submit_proposal(
+        runtime=runtime,
+        workflow_id=workflow_id,
+        proposal_id=proposal_id,
+        expected_pointer_version=pointer_version,
+        transport=transport,
+    )
+    return {
+        "workflow_id": workflow_id,
+        "proposal_id": proposal_id,
+        "expected_pointer_version": pointer_version,
+        "registry": submitted,
+    }
+
+
 @tool(parse_docstring=True)
 async def workflow_definition_get(
     workflow_id: str,
@@ -265,9 +363,51 @@ async def workflow_observation_get(
     return json.dumps(result, ensure_ascii=False, sort_keys=True)
 
 
+@tool(parse_docstring=True)
+async def workflow_proposal_status(workflow_id: str, runtime: Runtime) -> str:
+    """Read CloudMold's stable/candidate registry state and CAS pointer version.
+
+    Args:
+        workflow_id: Registered CloudMold Skill workflow identifier.
+    """
+    result = await _get_proposal_registry_status(runtime=runtime, workflow_id=workflow_id)
+    return json.dumps(result, ensure_ascii=False, sort_keys=True)
+
+
+@tool(parse_docstring=True)
+async def workflow_proposal_submit(
+    workflow_id: str,
+    proposal_id: str,
+    runtime: Runtime,
+    expected_pointer_version: int | None = None,
+) -> str:
+    """Submit a locally verified immutable proposal to CloudMold's candidate registry.
+
+    The tool reloads the managed review bundle from the current thread and
+    verifies its hashes before submission. It cannot accept model-supplied
+    definitions, approve, promote, execute, release, or roll back a workflow.
+
+    Args:
+        workflow_id: Registered CloudMold Skill workflow identifier.
+        proposal_id: Immutable proposal hash identifier returned by workflow_manage.
+        expected_pointer_version: Optional CAS version returned by
+            ``workflow_proposal_status``. When omitted, the tool reads the
+            current pointer version from CloudMold before submitting.
+    """
+    result = await _submit_workflow_proposal(
+        runtime=runtime,
+        workflow_id=workflow_id,
+        proposal_id=proposal_id,
+        expected_pointer_version=expected_pointer_version,
+    )
+    return json.dumps(result, ensure_ascii=False, sort_keys=True)
+
+
 __all__ = [
     "workflow_definition_get",
     "workflow_observation_get",
+    "workflow_proposal_status",
+    "workflow_proposal_submit",
     "_canonical_bytes",
     "_sha256",
 ]
