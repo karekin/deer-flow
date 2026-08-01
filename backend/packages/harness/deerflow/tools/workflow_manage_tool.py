@@ -370,7 +370,7 @@ def _summary(root: Path) -> dict[str, Any]:
 
 def load_proposal_for_submission(runtime: Runtime, workflow_id: str, proposal_id: str) -> dict[str, Any]:
     """Load an immutable local review bundle and re-verify every hash boundary."""
-    root, _owner_user_id = _workflow_root(runtime, workflow_id)
+    root, owner_user_id = _workflow_root(runtime, workflow_id)
     if not isinstance(proposal_id, str) or not re.fullmatch(r"proposal-[0-9a-f]{16}", proposal_id):
         raise ValueError("proposal_id must use the managed proposal hash identifier")
     proposal_root = root / "proposals" / proposal_id
@@ -394,11 +394,25 @@ def load_proposal_for_submission(runtime: Runtime, workflow_id: str, proposal_id
     if _sha256(candidate) != candidate_sha or proposal_id != f"proposal-{str(candidate_sha)[:16]}":
         raise ValueError("Managed proposal candidate hash does not match its immutable artifact")
     base = _read_active_snapshot(root, base_sha)
+    attestation_path = root / "active" / base_sha / "attestation.json"
+    if not attestation_path.exists():
+        raise ValueError("Managed proposal base attestation is missing")
+    base_attestation = _read_json(attestation_path)
+    current_pointer_path = root / "active" / "current.json"
+    current_pointer = _read_json(current_pointer_path) if current_pointer_path.exists() else None
+    base_attestation = _verify_active_attestation(
+        workflow_id=workflow_id,
+        owner_user_id=owner_user_id,
+        definition=base,
+        attestation=base_attestation,
+        current_pointer=current_pointer,
+    )
     if validation.get("passed") is not True or validation.get("base_sha256") != base_sha or validation.get("draft_sha256") != candidate_sha:
         raise ValueError("Managed proposal validation does not match the immutable definitions")
     return {
         "proposal": proposal,
         "base_definition": base,
+        "base_attestation": base_attestation,
         "candidate_definition": candidate,
         "validation": validation,
     }

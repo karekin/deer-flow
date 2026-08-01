@@ -144,6 +144,7 @@ async def test_workflow_manage_builds_hash_pinned_review_bundle(tmp_path: Path):
         packaged["proposal"]["proposal_id"],
     )
     assert submission["base_definition"]["skill_version"] == "1.0.0"
+    assert submission["base_attestation"]["definition_sha256"] == submission["proposal"]["base_sha256"]
     assert submission["candidate_definition"]["skill_version"] == "1.0.1"
     assert submission["proposal"] == packaged["proposal"]
     assert submission["validation"]["passed"] is True
