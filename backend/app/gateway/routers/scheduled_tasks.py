@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -16,6 +17,7 @@ from app.gateway.deps import (
     get_scheduled_task_service,
     get_thread_store,
 )
+from deerflow.persistence.agents import get_agent_store
 from deerflow.scheduler.schedules import (
     next_run_at as compute_next_run_at,
 )
@@ -37,6 +39,7 @@ def _ensure_task_mutable(task: dict[str, Any]) -> None:
 
 class ScheduledTaskCreateRequest(BaseModel):
     thread_id: str | None = None
+    assistant_id: str | None = None
     context_mode: str = "fresh_thread_per_run"
     title: str = Field(min_length=1)
     prompt: str = Field(min_length=1)
@@ -80,6 +83,21 @@ async def create_scheduled_task(request: Request, body: ScheduledTaskCreateReque
             raise HTTPException(status_code=422, detail="reuse_thread requires thread_id")
         if not await thread_store.check_access(body.thread_id, str(user.id), require_existing=True):
             raise HTTPException(status_code=404, detail="Thread not found")
+    assistant_id = body.assistant_id
+    if body.context_mode == "reuse_thread" and body.thread_id:
+        thread_record = await thread_store.get(body.thread_id)
+        persisted_assistant_id = thread_record.get("assistant_id") if isinstance(thread_record, dict) else None
+        if assistant_id and persisted_assistant_id and assistant_id != persisted_assistant_id:
+            raise HTTPException(status_code=409, detail="assistant_id does not match the selected thread")
+        assistant_id = assistant_id or persisted_assistant_id
+    if assistant_id and assistant_id != "lead_agent":
+        assistant_exists = await asyncio.to_thread(
+            get_agent_store().exists,
+            assistant_id,
+            user_id=str(user.id),
+        )
+        if not assistant_exists:
+            raise HTTPException(status_code=404, detail="Assistant not found")
     if body.schedule_type not in {"once", "cron"}:
         raise HTTPException(status_code=422, detail="Unsupported schedule_type")
 
@@ -113,7 +131,7 @@ async def create_scheduled_task(request: Request, body: ScheduledTaskCreateReque
         user_id=str(user.id),
         thread_id=body.thread_id,
         context_mode=body.context_mode,
-        assistant_id="lead_agent",
+        assistant_id=assistant_id or "lead_agent",
         title=body.title,
         prompt=body.prompt,
         schedule_type=body.schedule_type,

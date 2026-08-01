@@ -196,6 +196,11 @@ class AgentConfig(BaseModel):
     description: str = ""
     model: str | None = None
     tool_groups: list[str] | None = None
+    # Optional exact-name allowlist applied after configured, built-in, and MCP
+    # tools are assembled. This is operator-owned and intentionally not exposed
+    # to the agent self-update tool, so a constrained agent cannot widen its own
+    # authority.
+    allowed_tools: list[str] | None = None
     # skills controls which skills are discoverable and may be activated by the
     # agent. It does not activate their allowed-tools policies at construction:
     # - None (or omitted): load all enabled skills (default fallback behavior)

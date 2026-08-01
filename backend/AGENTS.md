@@ -721,11 +721,16 @@ that cannot tell sibling branches apart.
 
 Custom-agent `config.yaml` supports an optional `display_name`. The stable hyphen-case `name` remains the runtime and route identifier, while the workspace uses `display_name` for the agent card, chat header, and welcome screen and falls back to `name` when it is absent or blank.
 
+Custom-agent `config.yaml` also supports an operator-owned `allowed_tools` exact-name allowlist. It is applied after configured, built-in, and MCP tool assembly and is not exposed through the `update_agent` self-mutation tool. The managed `workflow-steward` template uses this boundary to expose only governed workflow-evolution tools, web evidence tools, and `workflow_manage`.
+
+`workflow_manage` is an E1 draft-plane tool, not an execution registry. It imports active definitions only after verifying a fresh HMAC attestation from the CloudMold registry (`CLOUDMOLD_WORKFLOW_ATTESTATION_SECRET`) that binds owner, workflow, version, definition hash, and issue time. It stores those snapshots immutably under the current thread's `outputs/workflow-steward/<workflow-id>/active/<sha>/`, maintains one optimistic hash-pinned draft, rejects stale/backward imports, root replacement, risk downgrade, new write capability, approval or idempotency weakening, derives a minimum proposal risk, and packages proposals for external CloudMold validation. `READY_FOR_REVIEW` proves only DeerFlow's local static preflight; CloudMold remains authoritative for capability catalogs, closure validation, replay, shadow, approval, release, active pointers, and rollback.
+
 4. **Subagent tool** (if enabled):
    - `task` - Delegate to subagent (description, prompt, subagent_type)
 
 Scheduled-task runtime note:
 - Scheduled background runs set `context.non_interactive=true` and therefore exclude `ask_clarification` from the lead-agent tool list. This keeps scheduler-triggered runs from stalling on human confirmation mid-execution. `non_interactive` is an internal-only context key: it is merged from `body.context` only when the request authenticated as the process-internal user (the scheduler path), never from arbitrary HTTP/IM clients.
+- A `reuse_thread` scheduled task derives `assistant_id` from the owned thread metadata and rejects a mismatching caller value. This keeps proactive custom-agent runs on the same agent identity while preserving the normal scheduler/run lifecycle.
 
 **Community tools** (`packages/harness/deerflow/community/`): optional integrations, each in its own subpackage and wired through `config.yaml`. Documented examples:
 - `tavily/` - Web search (5 results default) and web fetch (4KB limit)

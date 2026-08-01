@@ -1223,6 +1223,64 @@ def _make_agent_config(**kwargs):
     return AgentConfig(name="researcher", **kwargs)
 
 
+def test_custom_agent_exact_tool_allowlist_filters_configured_and_mcp_tools(monkeypatch):
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+    from deerflow.skills.describe import SkillSearchSetup
+
+    @tool
+    def allowed_external_tool() -> str:
+        """Allowed external tool."""
+        return "ok"
+
+    @tool
+    def forbidden_external_tool() -> str:
+        """Tool outside the agent allowlist."""
+        return "forbidden"
+
+    @tool
+    def forbidden_late_tool() -> str:
+        """Late-injected tool outside the agent allowlist."""
+        return "forbidden"
+
+    agent_config = _make_agent_config(
+        allowed_tools=["allowed_external_tool", "workflow_manage"],
+        skills=["workflow-steward"],
+    )
+    import deerflow.skills.describe as skill_describe_module
+    import deerflow.tools as tools_module
+
+    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda name, *, user_id=None: agent_config)
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        skill_describe_module,
+        "build_skill_search_setup",
+        lambda *args, **kwargs: SkillSearchSetup(
+            describe_skill_tool=forbidden_late_tool,
+            skill_names=frozenset({"workflow-steward"}),
+        ),
+    )
+    monkeypatch.setattr(
+        tools_module,
+        "get_available_tools",
+        lambda **kwargs: [allowed_external_tool, forbidden_external_tool],
+    )
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda config, model_name, agent_name=None, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    result = lead_agent_module._make_lead_agent(
+        {"context": {"agent_name": "researcher"}},
+        app_config=app_config,
+    )
+
+    names = {candidate.name for candidate in result["tools"]}
+    assert "allowed_external_tool" in names
+    assert "workflow_manage" in names
+    assert "forbidden_external_tool" not in names
+    assert "forbidden_late_tool" not in names
+    assert "update_agent" not in names
+
+
 def test_make_lead_agent_applies_agent_model_settings(monkeypatch):
     """A custom agent's model_settings flow into create_chat_model as
     model_overrides, and its thinking/reasoning defaults apply when the request

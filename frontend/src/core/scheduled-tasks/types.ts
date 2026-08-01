@@ -1,6 +1,7 @@
 export type ScheduledTask = {
   id: string;
   thread_id: string | null;
+  assistant_id: string | null;
   context_mode: "fresh_thread_per_run" | "reuse_thread";
   title: string;
   prompt: string;

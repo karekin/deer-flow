@@ -24,6 +24,7 @@ class _Repo:
             "user_id": kwargs["user_id"],
             "thread_id": kwargs["thread_id"],
             "context_mode": kwargs["context_mode"],
+            "assistant_id": kwargs["assistant_id"],
             "title": kwargs["title"],
             "prompt": kwargs["prompt"],
             "schedule_type": kwargs["schedule_type"],
@@ -168,6 +169,148 @@ async def test_create_fresh_thread_task_does_not_require_thread_id():
 
     assert created["context_mode"] == "fresh_thread_per_run"
     assert created["thread_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_reused_thread_task_inherits_custom_assistant(monkeypatch: pytest.MonkeyPatch):
+    repo = _Repo()
+    request = SimpleNamespace()
+    body = scheduled_tasks.ScheduledTaskCreateRequest(
+        context_mode="reuse_thread",
+        thread_id="steward-thread",
+        title="Daily workflow review",
+        prompt="Review workflow evidence and propose improvements",
+        schedule_type="cron",
+        schedule_spec={"cron": "0 9 * * *"},
+        timezone="UTC",
+    )
+    user = SimpleNamespace(id="user-1")
+    thread_store = SimpleNamespace(
+        check_access=AsyncMock(return_value=True),
+        get=AsyncMock(return_value={"assistant_id": "workflow-steward"}),
+    )
+    monkeypatch.setattr(
+        scheduled_tasks,
+        "get_agent_store",
+        lambda: SimpleNamespace(exists=lambda _name, *, user_id: True),
+    )
+
+    old_repo = scheduled_tasks.get_scheduled_task_repo
+    old_thread_store = scheduled_tasks.get_thread_store
+    old_config = scheduled_tasks.get_config
+    old_user = scheduled_tasks.get_optional_user_from_request
+    try:
+        scheduled_tasks.get_scheduled_task_repo = lambda _request: repo
+        scheduled_tasks.get_thread_store = lambda _request: thread_store
+        scheduled_tasks.get_config = lambda: _Config()
+        scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
+        created = await scheduled_tasks.create_scheduled_task.__wrapped__(request=request, body=body)
+    finally:
+        scheduled_tasks.get_scheduled_task_repo = old_repo
+        scheduled_tasks.get_thread_store = old_thread_store
+        scheduled_tasks.get_config = old_config
+        scheduled_tasks.get_optional_user_from_request = old_user
+
+    assert created["assistant_id"] == "workflow-steward"
+
+
+@pytest.mark.asyncio
+async def test_create_reused_thread_rejects_assistant_mismatch():
+    request = SimpleNamespace()
+    body = scheduled_tasks.ScheduledTaskCreateRequest(
+        context_mode="reuse_thread",
+        thread_id="steward-thread",
+        assistant_id="other-agent",
+        title="Daily workflow review",
+        prompt="Review workflow evidence",
+        schedule_type="cron",
+        schedule_spec={"cron": "0 9 * * *"},
+        timezone="UTC",
+    )
+    thread_store = SimpleNamespace(
+        check_access=AsyncMock(return_value=True),
+        get=AsyncMock(return_value={"assistant_id": "workflow-steward"}),
+    )
+    old_repo = scheduled_tasks.get_scheduled_task_repo
+    old_thread_store = scheduled_tasks.get_thread_store
+    old_config = scheduled_tasks.get_config
+    old_user = scheduled_tasks.get_optional_user_from_request
+    try:
+        scheduled_tasks.get_scheduled_task_repo = lambda _request: _Repo()
+        scheduled_tasks.get_thread_store = lambda _request: thread_store
+        scheduled_tasks.get_config = lambda: _Config()
+        scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=SimpleNamespace(id="user-1"))
+        with pytest.raises(Exception, match="assistant_id does not match"):
+            await scheduled_tasks.create_scheduled_task.__wrapped__(request=request, body=body)
+    finally:
+        scheduled_tasks.get_scheduled_task_repo = old_repo
+        scheduled_tasks.get_thread_store = old_thread_store
+        scheduled_tasks.get_config = old_config
+        scheduled_tasks.get_optional_user_from_request = old_user
+
+
+@pytest.mark.asyncio
+async def test_create_fresh_task_rejects_unknown_custom_assistant(monkeypatch: pytest.MonkeyPatch):
+    request = SimpleNamespace()
+    body = scheduled_tasks.ScheduledTaskCreateRequest(
+        assistant_id="missing-agent",
+        title="Daily workflow review",
+        prompt="Review workflow evidence",
+        schedule_type="cron",
+        schedule_spec={"cron": "0 9 * * *"},
+        timezone="UTC",
+    )
+    monkeypatch.setattr(scheduled_tasks, "get_scheduled_task_repo", lambda _request: _Repo())
+    monkeypatch.setattr(scheduled_tasks, "get_thread_store", lambda _request: SimpleNamespace())
+    monkeypatch.setattr(scheduled_tasks, "get_config", lambda: _Config())
+    monkeypatch.setattr(
+        scheduled_tasks,
+        "get_optional_user_from_request",
+        AsyncMock(return_value=SimpleNamespace(id="user-1")),
+    )
+    monkeypatch.setattr(
+        scheduled_tasks,
+        "get_agent_store",
+        lambda: SimpleNamespace(exists=lambda _name, *, user_id: False),
+    )
+
+    with pytest.raises(Exception, match="Assistant not found"):
+        await scheduled_tasks.create_scheduled_task.__wrapped__(request=request, body=body)
+
+
+@pytest.mark.asyncio
+async def test_create_reused_thread_rejects_unknown_explicit_assistant(monkeypatch: pytest.MonkeyPatch):
+    request = SimpleNamespace()
+    body = scheduled_tasks.ScheduledTaskCreateRequest(
+        context_mode="reuse_thread",
+        thread_id="legacy-thread",
+        assistant_id="missing-agent",
+        title="Daily workflow review",
+        prompt="Review workflow evidence",
+        schedule_type="cron",
+        schedule_spec={"cron": "0 9 * * *"},
+        timezone="UTC",
+    )
+    thread_store = SimpleNamespace(
+        check_access=AsyncMock(return_value=True),
+        get=AsyncMock(return_value={}),
+    )
+    monkeypatch.setattr(scheduled_tasks, "get_scheduled_task_repo", lambda _request: _Repo())
+    monkeypatch.setattr(scheduled_tasks, "get_thread_store", lambda _request: thread_store)
+    monkeypatch.setattr(scheduled_tasks, "get_config", lambda: _Config())
+    monkeypatch.setattr(
+        scheduled_tasks,
+        "get_optional_user_from_request",
+        AsyncMock(return_value=SimpleNamespace(id="user-1")),
+    )
+    monkeypatch.setattr(
+        scheduled_tasks,
+        "get_agent_store",
+        lambda: SimpleNamespace(exists=lambda _name, *, user_id: False),
+    )
+
+    with pytest.raises(Exception, match="Assistant not found"):
+        await scheduled_tasks.create_scheduled_task.__wrapped__(request=request, body=body)
 
 
 @pytest.mark.asyncio

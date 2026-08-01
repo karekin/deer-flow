@@ -99,6 +99,27 @@ describe("scheduled tasks api", () => {
     expect(result).toEqual(SAMPLE_TASK);
   });
 
+  it("preserves the custom assistant for proactive agent runs", async () => {
+    mockedFetch.mockResolvedValue(
+      jsonResponse({ ...SAMPLE_TASK, assistant_id: "workflow-steward" }),
+    );
+    const payload: ScheduledTaskPayload = {
+      context_mode: "reuse_thread",
+      thread_id: "steward-thread",
+      assistant_id: "workflow-steward",
+      title: "Daily workflow review",
+      prompt: "Review evidence and propose improvements",
+      schedule_type: "cron",
+      schedule_spec: { cron: "0 9 * * *" },
+      timezone: "UTC",
+    };
+
+    await createScheduledTask(payload);
+
+    const body = mockedFetch.mock.calls[0]?.[1]?.body as string;
+    expect(JSON.parse(body).assistant_id).toBe("workflow-steward");
+  });
+
   it("throws an Error carrying backend detail on failure", async () => {
     mockedFetch.mockResolvedValue(
       errorResponse("Cron expression is invalid", 422, "Unprocessable Entity"),

@@ -417,6 +417,14 @@ cleanup when migrating from legacy metadata credentials.
 
 Custom agents keep a stable hyphen-case `name` for routing and can optionally set a human-readable `display_name` for cards, chat headers, and welcome screens. For example, `name: cloudmold-inventory-control-agent` can be shown to operators as `display_name: 库控Agent` without changing existing chat routes or runtime identity.
 
+#### Governed Workflow Stewardship
+
+The local E1 draft plane accepts an active definition only with a fresh CloudMold registry attestation. Configure the shared verifier secret as `CLOUDMOLD_WORKFLOW_ATTESTATION_SECRET` in the DeerFlow service and the registry signer; the secret is never exposed as an agent tool input. Imports are bound to the workflow, owner, version, definition hash, and issue time, while proposal risk is constrained by a server-derived minimum.
+
+The Agents workspace can install the managed `workflow-steward` template without hand-editing agent YAML or workflow JSON. The checked-in E1 template requires only skill discovery and the local `workflow_manage` tool; governed web search is optional when configured. The local tool imports an immutable attested active snapshot, creates a hash-pinned draft, applies field-level JSON Patch, performs fail-closed static preflight, and packages a review bundle under the thread's outputs. Direct observation, Registry APIs, replay, shadow, Canary, release, and rollback are future CloudMold integrations and are not claimed by this template. It cannot activate, release, execute, or roll back a CloudMold workflow; those decisions remain with CloudMold's Workflow Registry, Agent Control, validation, approval, and release gates.
+
+Scheduled tasks created from a custom-agent thread now retain that thread's `assistant_id`, so daily evidence reviews and weekly workflow retrospectives wake the same managed Agent instead of silently falling back to the default lead agent.
+
 #### IM Channels
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.

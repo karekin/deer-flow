@@ -1,10 +1,15 @@
 "use client";
 
-import { BotIcon, PlusIcon } from "lucide-react";
+import { BotIcon, PlusIcon, SparklesIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import { useAgents } from "@/core/agents";
+import {
+  useAgents,
+  useAgentTemplates,
+  useInstallAgentTemplate,
+} from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 
 import { AgentCard } from "./agent-card";
@@ -12,7 +17,12 @@ import { AgentCard } from "./agent-card";
 export function AgentGallery() {
   const { t } = useI18n();
   const { agents, isLoading } = useAgents();
+  const { templates } = useAgentTemplates();
+  const installTemplate = useInstallAgentTemplate();
   const router = useRouter();
+  const workflowSteward = templates.find(
+    (template) => template.id === "workflow-steward" && !template.installed,
+  );
 
   const handleNewAgent = () => {
     router.push("/workspace/agents/new");
@@ -28,10 +38,35 @@ export function AgentGallery() {
             {t.agents.description}
           </p>
         </div>
-        <Button onClick={handleNewAgent}>
-          <PlusIcon className="mr-1.5 h-4 w-4" />
-          {t.agents.newAgent}
-        </Button>
+        <div className="flex items-center gap-2">
+          {workflowSteward && (
+            <Button
+              variant="outline"
+              disabled={installTemplate.isPending}
+              onClick={() =>
+                installTemplate.mutate(workflowSteward.id, {
+                  onSuccess: () =>
+                    toast.success(t.agents.workflowStewardInstalled),
+                  onError: (error) =>
+                    toast.error(
+                      error instanceof Error
+                        ? error.message
+                        : t.agents.workflowStewardInstallFailed,
+                    ),
+                })
+              }
+            >
+              <SparklesIcon className="mr-1.5 h-4 w-4" />
+              {installTemplate.isPending
+                ? t.agents.installingWorkflowSteward
+                : t.agents.installWorkflowSteward}
+            </Button>
+          )}
+          <Button onClick={handleNewAgent}>
+            <PlusIcon className="mr-1.5 h-4 w-4" />
+            {t.agents.newAgent}
+          </Button>
+        </div>
       </div>
 
       {/* Content */}

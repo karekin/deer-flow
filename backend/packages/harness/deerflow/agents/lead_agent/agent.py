@@ -731,7 +731,15 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     extra_tools = [update_agent] if agent_name and not is_webhook_channel else []
     # Default lead agent (unchanged behavior)
     raw_tools = get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled, app_config=resolved_app_config)
+    if agent_config and agent_config.allowed_tools is not None:
+        allowed_tool_names = set(agent_config.allowed_tools)
+        if "workflow_manage" in allowed_tool_names:
+            from deerflow.tools.workflow_manage_tool import workflow_manage
+
+            raw_tools.append(workflow_manage)
     configured_tools = raw_tools + extra_tools
+    if agent_config and agent_config.allowed_tools is not None:
+        configured_tools = [tool for tool in configured_tools if tool.name in allowed_tool_names]
     if non_interactive:
         configured_tools = [tool for tool in configured_tools if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
     authorization_candidates = [*configured_tools]
@@ -747,6 +755,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     )
     configured_tools = [tool for tool in authorized_tools if id(tool) in configured_tool_ids]
     late_tools = [tool for tool in authorized_tools if id(tool) not in configured_tool_ids]
+    if agent_config and agent_config.allowed_tools is not None:
+        late_tools = [tool for tool in late_tools if tool.name in allowed_tool_names]
     final_tools, setup = assemble_deferred_tools(configured_tools, enabled=resolved_app_config.tool_search.enabled)
     final_tools.extend(late_tools)
     mcp_routing_middleware = build_mcp_routing_middleware(

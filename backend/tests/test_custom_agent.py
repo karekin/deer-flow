@@ -571,6 +571,35 @@ class TestAgentsAPI:
         data = response.json()
         assert data["agents"] == []
 
+    def test_install_workflow_steward_template(self, agent_client, tmp_path):
+        templates = agent_client.get("/api/agent-templates")
+        assert templates.status_code == 200
+        assert templates.json()[0]["id"] == "workflow-steward"
+        assert templates.json()[0]["installed"] is False
+
+        response = agent_client.post("/api/agent-templates/workflow-steward/install")
+
+        assert response.status_code == 201
+        assert response.json()["name"] == "workflow-steward"
+        assert response.json()["display_name"] == "工作流管家"
+        config_file = tmp_path / "users" / "test-user-autouse" / "agents" / "workflow-steward" / "config.yaml"
+        config = yaml.safe_load(config_file.read_text())
+        assert config["skills"] == ["workflow-steward"]
+        assert "describe_skill" in config["allowed_tools"]
+        assert "workflow_manage" in config["allowed_tools"]
+        assert "workflow_release_request" not in config["allowed_tools"]
+
+        installed = agent_client.get("/api/agent-templates").json()[0]
+        assert installed["installed"] is True
+
+    def test_install_workflow_steward_template_is_idempotency_safe(self, agent_client):
+        assert agent_client.post("/api/agent-templates/workflow-steward/install").status_code == 201
+        assert agent_client.post("/api/agent-templates/workflow-steward/install").status_code == 409
+
+    def test_install_unknown_agent_template_returns_404(self, agent_client):
+        response = agent_client.post("/api/agent-templates/unknown/install")
+        assert response.status_code == 404
+
     def test_create_agent(self, agent_client):
         payload = {
             "name": "code-reviewer",

@@ -346,6 +346,10 @@ export interface Translations {
     title: string;
     description: string;
     newAgent: string;
+    installWorkflowSteward: string;
+    installingWorkflowSteward: string;
+    workflowStewardInstalled: string;
+    workflowStewardInstallFailed: string;
     emptyTitle: string;
     emptyDescription: string;
     featureDisabledTitle: string;

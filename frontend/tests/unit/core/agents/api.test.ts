@@ -29,6 +29,8 @@ rs.mock("@/core/config", () => ({
 import {
   AgentsApiDisabledError,
   checkAgentName,
+  installAgentTemplate,
+  listAgentTemplates,
   updateAgent,
 } from "@/core/agents/api";
 import { fetch as fetcher } from "@/core/api/fetcher";
@@ -183,5 +185,49 @@ describe("updateAgent", () => {
       thinking_enabled: true,
       reasoning_effort: "high",
     });
+  });
+});
+
+describe("managed agent templates", () => {
+  test("lists installable workflow steward metadata", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, [
+        {
+          id: "workflow-steward",
+          name: "workflow-steward",
+          display_name: "工作流管家",
+          description: "Maintains workflows",
+          skills: ["workflow-steward"],
+          required_tools: ["describe_skill", "workflow_manage"],
+          optional_tools: ["web_search", "web_fetch"],
+          installed: false,
+        },
+      ]),
+    );
+
+    const templates = await listAgentTemplates();
+
+    expect(templates[0]?.id).toBe("workflow-steward");
+    expect(mockedFetch.mock.calls[0]?.[0]).toBe("/api/agent-templates");
+  });
+
+  test("installs a template through the managed endpoint", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(201, {
+        name: "workflow-steward",
+        display_name: "工作流管家",
+        description: "Maintains workflows",
+        model: null,
+        tool_groups: null,
+        skills: ["workflow-steward"],
+      }),
+    );
+
+    await installAgentTemplate("workflow-steward");
+
+    expect(mockedFetch.mock.calls[0]?.[0]).toBe(
+      "/api/agent-templates/workflow-steward/install",
+    );
+    expect(mockedFetch.mock.calls[0]?.[1]?.method).toBe("POST");
   });
 });

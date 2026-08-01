@@ -434,6 +434,10 @@ export const enUS: Translations = {
     description:
       "Create and manage custom agents with specialized prompts and capabilities.",
     newAgent: "New Agent",
+    installWorkflowSteward: "Install Workflow Steward",
+    installingWorkflowSteward: "Installing...",
+    workflowStewardInstalled: "Workflow Steward installed",
+    workflowStewardInstallFailed: "Failed to install Workflow Steward",
     emptyTitle: "No custom agents yet",
     emptyDescription:
       "Create your first custom agent with a specialized system prompt.",

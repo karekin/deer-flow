@@ -6,7 +6,9 @@ import {
   deleteAgent,
   fetchAgentsApiEnabled,
   getAgent,
+  installAgentTemplate,
   listAgents,
+  listAgentTemplates,
   updateAgent,
 } from "./api";
 import {
@@ -61,6 +63,25 @@ export function useAgents() {
     queryFn: () => listAgents(),
   });
   return { agents: data ?? [], isLoading, error };
+}
+
+export function useAgentTemplates() {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["agent-templates"],
+    queryFn: () => listAgentTemplates(),
+  });
+  return { templates: data ?? [], isLoading, error };
+}
+
+export function useInstallAgentTemplate() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (templateId: string) => installAgentTemplate(templateId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["agents"] });
+      void queryClient.invalidateQueries({ queryKey: ["agent-templates"] });
+    },
+  });
 }
 
 export function useAgent(name: string | null | undefined) {

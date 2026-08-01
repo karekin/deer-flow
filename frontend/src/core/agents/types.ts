@@ -42,3 +42,14 @@ export interface UpdateAgentRequest {
   reasoning_effort?: ReasoningEffort | null;
   soul?: string | null;
 }
+
+export interface AgentTemplate {
+  id: string;
+  name: string;
+  display_name: string;
+  description: string;
+  skills: string[];
+  required_tools: string[];
+  optional_tools: string[];
+  installed: boolean;
+}

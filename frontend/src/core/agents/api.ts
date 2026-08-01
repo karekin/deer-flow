@@ -2,7 +2,12 @@ import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 export { fetchAgentsApiEnabled } from "@/core/features/api";
 
-import type { Agent, CreateAgentRequest, UpdateAgentRequest } from "./types";
+import type {
+  Agent,
+  AgentTemplate,
+  CreateAgentRequest,
+  UpdateAgentRequest,
+} from "./types";
 
 const BACKEND_UNAVAILABLE_STATUSES = new Set([502, 503, 504]);
 
@@ -41,6 +46,27 @@ export async function listAgents(): Promise<Agent[]> {
   if (!res.ok) throw new Error(`Failed to load agents: ${res.statusText}`);
   const data = (await res.json()) as { agents: Agent[] };
   return data.agents;
+}
+
+export async function listAgentTemplates(): Promise<AgentTemplate[]> {
+  const res = await fetch(`${getBackendBaseURL()}/api/agent-templates`);
+  if (!res.ok)
+    throw new Error(`Failed to load agent templates: ${res.statusText}`);
+  return res.json() as Promise<AgentTemplate[]>;
+}
+
+export async function installAgentTemplate(templateId: string): Promise<Agent> {
+  const res = await fetch(
+    `${getBackendBaseURL()}/api/agent-templates/${encodeURIComponent(templateId)}/install`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { detail?: string };
+    throw new Error(
+      err.detail ?? `Failed to install agent template: ${res.statusText}`,
+    );
+  }
+  return res.json() as Promise<Agent>;
 }
 
 export async function getAgent(name: string): Promise<Agent> {

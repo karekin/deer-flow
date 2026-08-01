@@ -69,6 +69,7 @@ export default function ScheduledTasksPage() {
   const st = t.scheduledTasks;
   const searchParams = useSearchParams();
   const threadId = searchParams.get("thread_id");
+  const assistantId = searchParams.get("assistant_id");
   const allTasksQuery = useScheduledTasks();
   const threadTasksQuery = useThreadScheduledTasks(threadId);
   const data = threadId ? threadTasksQuery.data : allTasksQuery.data;
@@ -281,6 +282,7 @@ export default function ScheduledTasksPage() {
                     context_mode: contextMode,
                     thread_id:
                       contextMode === "reuse_thread" ? targetThreadId : null,
+                    assistant_id: assistantId,
                     title,
                     prompt,
                     schedule_type: createSchedule.schedule_type,
