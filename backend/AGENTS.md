@@ -69,7 +69,7 @@ deer-flow/
     └── custom/                # Custom skills (gitignored)
 ```
 
-The skills router also owns the read-only CloudMold business catalog bridge. `deerflow.skills.business_catalog` validates `skills/public/business-taxonomy.json`, overlays it on the effective public/integration runtime inventory, assigns uncatalogued packages to the configured shared-platform fallback, and computes content/catalog digests off the event loop. `/api/skills/business-catalog` exposes the business-unit/domain/role hierarchy; `/api/skills/business-catalog/{skill_name}` externalizes one validated `SKILL.md` without returning filesystem paths. Do not broaden the detail route to custom or legacy content without a separate authorization design.
+The skills router also owns the read-only CloudMold business catalog bridge. `deerflow.skills.business_catalog` validates `skills/public/business-taxonomy.json`, overlays it on the effective public/integration runtime inventory before custom-name shadowing, assigns uncatalogued packages to the configured shared-platform fallback, and computes content/catalog digests off the event loop. `/api/skills/business-catalog` exposes the business-unit/domain/role hierarchy; `/api/skills/business-catalog/{skill_name}` externalizes one validated `SKILL.md` without returning filesystem paths. Both routes require the audience-limited `X-DeerFlow-Skill-Catalog-Token`; `AuthMiddleware` lets only this route family reach its own token check, and the credential must never be accepted as the Gateway-wide internal identity. Host-local absolute paths fail closed. Do not broaden the detail route to custom or legacy content without a separate authorization design.
 
 ## Important Development Guidelines
 

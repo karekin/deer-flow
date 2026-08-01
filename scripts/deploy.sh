@@ -231,6 +231,36 @@ if  [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_INTERNAL_AUTH_TOKEN" ]; then
     fi
 fi
 
+# ── DEER_FLOW_SKILL_CATALOG_AUTH_TOKEN ──────────────────────────────────────
+# Audience-limited credential for read-only business Skill catalog consumers.
+
+_skill_catalog_auth_token_file="$DEER_FLOW_HOME/.skill-catalog-auth-token"
+if [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_SKILL_CATALOG_AUTH_TOKEN" ]; then
+    if [ -f "$_skill_catalog_auth_token_file" ]; then
+        export DEER_FLOW_SKILL_CATALOG_AUTH_TOKEN
+        DEER_FLOW_SKILL_CATALOG_AUTH_TOKEN="$(cat "$_skill_catalog_auth_token_file")"
+        echo -e "${GREEN}✓ DEER_FLOW_SKILL_CATALOG_AUTH_TOKEN loaded from $_skill_catalog_auth_token_file${NC}"
+    else
+        export DEER_FLOW_SKILL_CATALOG_AUTH_TOKEN
+        if command -v python3 > /dev/null 2>&1 && \
+            DEER_FLOW_SKILL_CATALOG_AUTH_TOKEN="$(python3 -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1); import secrets; print(secrets.token_urlsafe(32))' 2>/dev/null)"; then
+            true
+        elif command -v python > /dev/null 2>&1 && \
+            DEER_FLOW_SKILL_CATALOG_AUTH_TOKEN="$(python -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1); import secrets; print(secrets.token_urlsafe(32))' 2>/dev/null)"; then
+            true
+        elif command -v openssl > /dev/null 2>&1 && \
+            DEER_FLOW_SKILL_CATALOG_AUTH_TOKEN="$(openssl rand -hex 32)"; then
+            true
+        else
+            echo -e "${RED}✗ Cannot generate DEER_FLOW_SKILL_CATALOG_AUTH_TOKEN: python3, python, and openssl are all unavailable.${NC}" >&2
+            exit 1
+        fi
+        echo "$DEER_FLOW_SKILL_CATALOG_AUTH_TOKEN" > "$_skill_catalog_auth_token_file"
+        chmod 600 "$_skill_catalog_auth_token_file"
+        echo -e "${GREEN}✓ DEER_FLOW_SKILL_CATALOG_AUTH_TOKEN generated → $_skill_catalog_auth_token_file${NC}"
+    fi
+fi
+
 # ── UV_EXTRAS auto-detection ─────────────────────────────────────────────────
 # The production Dockerfile accepts UV_EXTRAS as a single build-arg token and
 # adds the --extra prefix itself. Convert the detector's uv flag string

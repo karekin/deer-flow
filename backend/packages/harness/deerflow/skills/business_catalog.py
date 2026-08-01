@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from deerflow.skills.frontmatter import split_skill_markdown
+from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.storage.skill_storage import SkillStorage
 from deerflow.skills.types import Skill, SkillCategory
 
@@ -16,10 +19,27 @@ BUSINESS_TAXONOMY_SCHEMA = "cloudmold.skill-business-taxonomy/v1"
 _MAX_TAXONOMY_BYTES = 1_048_576
 _MAX_SKILL_CONTENT_BYTES = 2_097_152
 _CATALOG_CATEGORIES = {SkillCategory.PUBLIC.value, SkillCategory.INTEGRATION.value}
+_HOST_LOCAL_PATH_RE = re.compile(r"(?:/Users/|/home/[^/\s]+/|/var/folders/|[A-Za-z]:\\\\Users\\\\)")
 
 
 class BusinessCatalogError(ValueError):
     """Raised when the business catalog cannot be produced safely."""
+
+
+class BusinessTaxonomyUnavailable(BusinessCatalogError):
+    """Raised when the authoritative taxonomy cannot be loaded or validated."""
+
+
+class BusinessSkillNotFound(BusinessCatalogError):
+    """Raised when a requested public/integration Skill does not exist."""
+
+
+class BusinessCatalogInvalidRequest(BusinessCatalogError):
+    """Raised when a catalog request contains an invalid Skill name."""
+
+
+class BusinessSkillContentUnsafe(BusinessCatalogError):
+    """Raised when Skill content is unsafe to externalize."""
 
 
 def _category_value(skill: Skill) -> str:
@@ -31,7 +51,8 @@ def _read_text(path: Path, *, limit: int, label: str) -> str:
     try:
         size = path.stat().st_size
     except FileNotFoundError as exc:
-        raise BusinessCatalogError(f"{label} not found") from exc
+        error_type = BusinessTaxonomyUnavailable if label == "Business taxonomy" else BusinessCatalogError
+        raise error_type(f"{label} not found") from exc
     if size > limit:
         raise BusinessCatalogError(f"{label} exceeds the {limit}-byte read limit")
     try:
@@ -43,7 +64,7 @@ def _read_text(path: Path, *, limit: int, label: str) -> str:
 def _require_list(payload: dict[str, Any], key: str) -> list[dict[str, Any]]:
     value = payload.get(key)
     if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
-        raise BusinessCatalogError(f"Taxonomy field '{key}' must be a list of objects")
+        raise BusinessTaxonomyUnavailable(f"Taxonomy field '{key}' must be a list of objects")
     return value
 
 
@@ -52,9 +73,9 @@ def _index_unique(items: list[dict[str, Any]], *, label: str) -> dict[str, dict[
     for item in items:
         code = item.get("code")
         if not isinstance(code, str) or not code.strip():
-            raise BusinessCatalogError(f"Every {label} must have a non-empty code")
+            raise BusinessTaxonomyUnavailable(f"Every {label} must have a non-empty code")
         if code in indexed:
-            raise BusinessCatalogError(f"Duplicate {label} code '{code}'")
+            raise BusinessTaxonomyUnavailable(f"Duplicate {label} code '{code}'")
         indexed[code] = item
     return indexed
 
@@ -64,16 +85,16 @@ def _load_taxonomy(storage: SkillStorage) -> tuple[dict[str, Any], str]:
     try:
         taxonomy_path = storage.validate_skill_file_path(taxonomy_path)
     except ValueError as exc:
-        raise BusinessCatalogError("Taxonomy path escaped the configured skills root") from exc
+        raise BusinessTaxonomyUnavailable("Taxonomy path escaped the configured skills root") from exc
     content = _read_text(taxonomy_path, limit=_MAX_TAXONOMY_BYTES, label="Business taxonomy")
     try:
         payload = json.loads(content)
     except json.JSONDecodeError as exc:
-        raise BusinessCatalogError("Business taxonomy is not valid JSON") from exc
+        raise BusinessTaxonomyUnavailable("Business taxonomy is not valid JSON") from exc
     if not isinstance(payload, dict):
-        raise BusinessCatalogError("Business taxonomy must be a JSON object")
+        raise BusinessTaxonomyUnavailable("Business taxonomy must be a JSON object")
     if payload.get("schema_version") != BUSINESS_TAXONOMY_SCHEMA:
-        raise BusinessCatalogError(f"Business taxonomy schema_version must be '{BUSINESS_TAXONOMY_SCHEMA}'")
+        raise BusinessTaxonomyUnavailable(f"Business taxonomy schema_version must be '{BUSINESS_TAXONOMY_SCHEMA}'")
 
     units = _index_unique(_require_list(payload, "business_units"), label="business unit")
     domains = _index_unique(_require_list(payload, "domains"), label="domain")
@@ -81,26 +102,53 @@ def _load_taxonomy(storage: SkillStorage) -> tuple[dict[str, Any], str]:
     assignments = _require_list(payload, "skill_assignments")
     fallback = payload.get("fallback_assignment")
     if not isinstance(fallback, dict):
-        raise BusinessCatalogError("Taxonomy field 'fallback_assignment' must be an object")
+        raise BusinessTaxonomyUnavailable("Taxonomy field 'fallback_assignment' must be an object")
 
     for role in roles.values():
         if role.get("domain_code") not in domains:
-            raise BusinessCatalogError(f"Role '{role['code']}' references an unknown domain")
+            raise BusinessTaxonomyUnavailable(f"Role '{role['code']}' references an unknown domain")
     for assignment in [*assignments, fallback]:
         if assignment.get("business_unit_code") not in units:
-            raise BusinessCatalogError("Skill assignment references an unknown business unit")
+            raise BusinessTaxonomyUnavailable("Skill assignment references an unknown business unit")
         if assignment.get("role_code") not in roles:
-            raise BusinessCatalogError("Skill assignment references an unknown role")
+            raise BusinessTaxonomyUnavailable("Skill assignment references an unknown role")
     for assignment in assignments:
         if not isinstance(assignment.get("skill_name"), str) or not assignment["skill_name"]:
-            raise BusinessCatalogError("Every explicit skill assignment must have a skill_name")
+            raise BusinessTaxonomyUnavailable("Every explicit skill assignment must have a skill_name")
 
     digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
     return payload, digest
 
 
 def _effective_catalog_skills(storage: SkillStorage) -> dict[str, Skill]:
-    return {skill.name: skill for skill in storage.load_skills(enabled_only=False) if _category_value(skill) in _CATALOG_CATEGORIES}
+    """Discover governed categories before name de-duplication.
+
+    User-scoped storage may contain a custom Skill with the same name as a
+    public Skill. Filtering the already de-duplicated ``load_skills`` result
+    would let that custom package hide the governed public source.
+    """
+    skills: dict[str, Skill] = {}
+    for category, category_root, skill_file in storage._iter_skill_files():  # noqa: SLF001 - category-aware storage traversal
+        category_value = category.value if hasattr(category, "value") else str(category)
+        if category_value not in _CATALOG_CATEGORIES:
+            continue
+        skill = parse_skill_file(skill_file, category=category, relative_path=skill_file.parent.relative_to(category_root))
+        if skill is None:
+            continue
+        if skill.name in skills:
+            raise BusinessCatalogError(f"Duplicate governed Skill name '{skill.name}'")
+        skills[skill.name] = skill
+
+    try:
+        from deerflow.config.extensions_config import ExtensionsConfig
+
+        extensions = ExtensionsConfig.from_file()
+        skills = {name: replace(skill, enabled=extensions.is_skill_enabled(skill.name, skill.category)) for name, skill in skills.items()}
+    except Exception:
+        # Match the runtime loader's availability behavior: parsing still works
+        # when the optional enabled-state file is unavailable.
+        pass
+    return skills
 
 
 def _skill_summary(storage: SkillStorage, skill: Skill) -> dict[str, Any]:
@@ -183,6 +231,7 @@ def build_business_skill_catalog(storage: SkillStorage) -> dict[str, Any]:
                         "name": role["name"],
                         "order": role.get("order", 0),
                         "skill_count": len(role_skills),
+                        "enabled_skill_count": sum(1 for item in role_skills if item["enabled"]),
                         "skills": sorted(role_skills, key=lambda item: item["name"]),
                     }
                 )
@@ -193,6 +242,7 @@ def build_business_skill_catalog(storage: SkillStorage) -> dict[str, Any]:
                     "name": domain["name"],
                     "order": domain.get("order", 0),
                     "skill_count": sum(item["skill_count"] for item in role_responses),
+                    "enabled_skill_count": sum(item["enabled_skill_count"] for item in role_responses),
                     "roles": role_responses,
                 }
             )
@@ -204,6 +254,7 @@ def build_business_skill_catalog(storage: SkillStorage) -> dict[str, Any]:
                 "status": unit.get("status", "ACTIVE"),
                 "order": unit.get("order", 0),
                 "skill_count": sum(item["skill_count"] for item in domain_responses),
+                "enabled_skill_count": sum(item["enabled_skill_count"] for item in domain_responses),
                 "domains": domain_responses,
             }
         )
@@ -212,7 +263,9 @@ def build_business_skill_catalog(storage: SkillStorage) -> dict[str, Any]:
         "schema_version": BUSINESS_TAXONOMY_SCHEMA,
         "taxonomy_sha256": taxonomy_sha256,
         "skill_count": len(skills),
+        "enabled_skill_count": sum(1 for skill in skills.values() if skill.enabled),
         "assigned_skill_count": len(rows),
+        "enabled_assigned_skill_count": sum(1 for _, skill in rows if skill.enabled),
         "missing_skill_names": missing,
         "business_units": unit_responses,
     }
@@ -225,23 +278,39 @@ def read_business_skill_content(storage: SkillStorage, skill_name: str) -> dict[
     try:
         normalized_name = storage.validate_skill_name(skill_name)
     except ValueError as exc:
-        raise BusinessCatalogError(str(exc)) from exc
+        raise BusinessCatalogInvalidRequest(str(exc)) from exc
     taxonomy, taxonomy_sha256 = _load_taxonomy(storage)
     skill = _effective_catalog_skills(storage).get(normalized_name)
     if skill is None:
-        raise BusinessCatalogError(f"Business skill '{normalized_name}' not found")
+        raise BusinessSkillNotFound(f"Business skill '{normalized_name}' not found")
     try:
         skill_file = storage.validate_skill_file_path(skill.skill_file)
     except ValueError as exc:
         raise BusinessCatalogError(f"Skill '{normalized_name}' resolved outside the configured skills root") from exc
     content = _read_text(skill_file, limit=_MAX_SKILL_CONTENT_BYTES, label=f"Skill '{normalized_name}' content")
+    if _HOST_LOCAL_PATH_RE.search(content):
+        raise BusinessSkillContentUnsafe(f"Skill '{normalized_name}' contains a host-local absolute path")
     parts, error = split_skill_markdown(content)
     if parts is None:
         raise BusinessCatalogError(f"Skill '{normalized_name}' has invalid frontmatter: {error}")
+    classifications = _classifications_for_skill(taxonomy, normalized_name)
+    detail_sha256 = hashlib.sha256(
+        json.dumps(
+            {
+                "classifications": classifications,
+                "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                "taxonomy_sha256": taxonomy_sha256,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     return {
         **_skill_summary(storage, skill),
         "taxonomy_sha256": taxonomy_sha256,
-        "classifications": _classifications_for_skill(taxonomy, normalized_name),
+        "detail_sha256": detail_sha256,
+        "classifications": classifications,
         "metadata": parts.metadata.get("metadata", {}),
         "body": parts.body,
         "content": content,

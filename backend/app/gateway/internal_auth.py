@@ -14,6 +14,8 @@ INTERNAL_AUTH_HEADER_NAME = "X-DeerFlow-Internal-Token"
 INTERNAL_OWNER_USER_ID_HEADER_NAME = "X-DeerFlow-Owner-User-Id"
 INTERNAL_AUTH_ENV_VAR = "DEER_FLOW_INTERNAL_AUTH_TOKEN"
 INTERNAL_SYSTEM_ROLE = "internal"
+SKILL_CATALOG_AUTH_HEADER_NAME = "X-DeerFlow-Skill-Catalog-Token"
+SKILL_CATALOG_AUTH_ENV_VAR = "DEER_FLOW_SKILL_CATALOG_AUTH_TOKEN"
 
 
 def _load_internal_auth_token() -> str:
@@ -24,6 +26,7 @@ def _load_internal_auth_token() -> str:
 
 
 _INTERNAL_AUTH_TOKEN = _load_internal_auth_token()
+_SKILL_CATALOG_AUTH_TOKEN = os.environ.get(SKILL_CATALOG_AUTH_ENV_VAR) or secrets.token_urlsafe(32)
 
 
 def create_internal_auth_headers(*, owner_user_id: str | None = None) -> dict[str, str]:
@@ -37,6 +40,11 @@ def create_internal_auth_headers(*, owner_user_id: str | None = None) -> dict[st
 def is_valid_internal_auth_token(token: str | None) -> bool:
     """Return True when *token* matches this Gateway worker's internal token."""
     return bool(token) and secrets.compare_digest(token, _INTERNAL_AUTH_TOKEN)
+
+
+def is_valid_skill_catalog_auth_token(token: str | None) -> bool:
+    """Validate the audience-limited token accepted only by Skill catalog GET routes."""
+    return bool(token) and secrets.compare_digest(token, _SKILL_CATALOG_AUTH_TOKEN)
 
 
 def get_internal_user(owner_user_id: str | None = None):

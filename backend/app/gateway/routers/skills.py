@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from app.gateway.deps import get_config, require_admin_user
+from app.gateway.internal_auth import SKILL_CATALOG_AUTH_HEADER_NAME, is_valid_skill_catalog_auth_token
 from app.gateway.path_utils import resolve_thread_virtual_path
 from deerflow.agents.lead_agent.prompt import clear_skills_system_prompt_cache, refresh_skills_system_prompt_cache_async, refresh_user_skills_system_prompt_cache_async
 from deerflow.config.app_config import AppConfig
@@ -21,7 +22,15 @@ from deerflow.config.extensions_config import (
 )
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills import Skill
-from deerflow.skills.business_catalog import BusinessCatalogError, build_business_skill_catalog, read_business_skill_content
+from deerflow.skills.business_catalog import (
+    BusinessCatalogError,
+    BusinessCatalogInvalidRequest,
+    BusinessSkillContentUnsafe,
+    BusinessSkillNotFound,
+    BusinessTaxonomyUnavailable,
+    build_business_skill_catalog,
+    read_business_skill_content,
+)
 from deerflow.skills.installer import SkillAlreadyExistsError, SkillSecurityScanError
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.security_static_scanner import (
@@ -38,6 +47,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["skills"])
 
 _ADMIN_REQUIRED_DETAIL = "Admin privileges required to manage skills."
+
+
+def _require_business_catalog_reader(request: Request) -> None:
+    if not is_valid_skill_catalog_auth_token(request.headers.get(SKILL_CATALOG_AUTH_HEADER_NAME)):
+        raise HTTPException(status_code=401, detail="Valid Skill catalog reader token required")
 
 
 class SkillResponse(BaseModel):
@@ -70,6 +84,7 @@ class BusinessRoleSkillGroup(BaseModel):
     name: str
     order: int
     skill_count: int
+    enabled_skill_count: int
     skills: list[BusinessSkillSummary]
 
 
@@ -78,6 +93,7 @@ class BusinessDomainSkillGroup(BaseModel):
     name: str
     order: int
     skill_count: int
+    enabled_skill_count: int
     roles: list[BusinessRoleSkillGroup]
 
 
@@ -87,6 +103,7 @@ class BusinessUnitSkillGroup(BaseModel):
     status: str
     order: int
     skill_count: int
+    enabled_skill_count: int
     domains: list[BusinessDomainSkillGroup]
 
 
@@ -95,7 +112,9 @@ class BusinessSkillCatalogResponse(BaseModel):
     taxonomy_sha256: str
     catalog_sha256: str
     skill_count: int
+    enabled_skill_count: int
     assigned_skill_count: int
+    enabled_assigned_skill_count: int
     missing_skill_names: list[str]
     business_units: list[BusinessUnitSkillGroup]
 
@@ -111,6 +130,7 @@ class BusinessSkillClassification(BaseModel):
 
 class BusinessSkillContentResponse(BusinessSkillSummary):
     taxonomy_sha256: str
+    detail_sha256: str
     classifications: list[BusinessSkillClassification]
     metadata: dict
     body: str
@@ -229,7 +249,8 @@ async def list_skills(config: AppConfig = Depends(get_config)) -> SkillsListResp
     summary="List Business Skill Catalog",
     description="Read the effective public Skill catalog grouped by business unit, business domain, and role.",
 )
-async def list_business_skill_catalog(response: Response, config: AppConfig = Depends(get_config)) -> BusinessSkillCatalogResponse:
+async def list_business_skill_catalog(request: Request, response: Response, config: AppConfig = Depends(get_config)) -> BusinessSkillCatalogResponse:
+    _require_business_catalog_reader(request)
     try:
         payload = await asyncio.to_thread(lambda: build_business_skill_catalog(_get_user_skill_storage(config)))
     except BusinessCatalogError as exc:
@@ -249,16 +270,22 @@ async def list_business_skill_catalog(response: Response, config: AppConfig = De
     summary="Get Business Skill Content",
     description="Read one effective public or integration SKILL.md together with its business classification and content digest.",
 )
-async def get_business_skill_content(skill_name: str, response: Response, config: AppConfig = Depends(get_config)) -> BusinessSkillContentResponse:
+async def get_business_skill_content(skill_name: str, request: Request, response: Response, config: AppConfig = Depends(get_config)) -> BusinessSkillContentResponse:
+    _require_business_catalog_reader(request)
     try:
         payload = await asyncio.to_thread(lambda: read_business_skill_content(_get_user_skill_storage(config), skill_name))
+    except BusinessSkillNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except BusinessTaxonomyUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (BusinessCatalogInvalidRequest, BusinessSkillContentUnsafe) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except BusinessCatalogError as exc:
-        status_code = 404 if "not found" in str(exc).lower() else 400
-        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail="Business Skill catalog validation failed") from exc
     except Exception as exc:
         logger.exception("Failed to read business skill content for %s", skill_name)
         raise HTTPException(status_code=500, detail="Failed to read business skill content") from exc
-    response.headers["ETag"] = f'"{payload["content_sha256"]}"'
+    response.headers["ETag"] = f'"{payload["detail_sha256"]}"'
     response.headers["Cache-Control"] = "private, max-age=0, must-revalidate"
     return BusinessSkillContentResponse.model_validate(payload)
 

@@ -202,6 +202,7 @@ services:
       - DEER_FLOW_CHANNELS_LANGGRAPH_URL=${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://gateway:8001/api}
       - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
       - DEER_FLOW_INTERNAL_AUTH_TOKEN=${DEER_FLOW_INTERNAL_AUTH_TOKEN:-}
+      - DEER_FLOW_SKILL_CATALOG_AUTH_TOKEN=${DEER_FLOW_SKILL_CATALOG_AUTH_TOKEN:-}
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
       # Pass PROVISIONER_API_KEY into the gateway container so config.yaml can reference it

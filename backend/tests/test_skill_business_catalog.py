@@ -7,6 +7,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.gateway import internal_auth
+from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.deps import get_config
 from app.gateway.routers import skills as skills_router
 from deerflow.skills.business_catalog import (
@@ -94,6 +96,36 @@ def test_content_response_externalizes_public_skill_without_host_path(tmp_path: 
     assert str(tmp_path) not in json.dumps(detail)
 
 
+def test_catalog_keeps_public_skill_when_custom_skill_uses_same_name(tmp_path: Path) -> None:
+    root = tmp_path / "skills"
+    (root / "public").mkdir(parents=True)
+    _write_skill(root, "merchant-skill", "Public merchant operations")
+    custom = root / "custom" / "merchant-skill"
+    custom.mkdir(parents=True)
+    (custom / "SKILL.md").write_text(
+        "---\nname: merchant-skill\ndescription: Private shadow\n---\n\nPrivate.\n",
+        encoding="utf-8",
+    )
+    _write_taxonomy(root)
+
+    detail = read_business_skill_content(LocalSkillStorage(host_path=str(root)), "merchant-skill")
+
+    assert detail["description"] == "Public merchant operations"
+    assert "Private shadow" not in detail["content"]
+
+
+def test_content_rejects_host_absolute_paths(tmp_path: Path) -> None:
+    root = tmp_path / "skills"
+    (root / "public").mkdir(parents=True)
+    _write_skill(root, "merchant-skill")
+    skill_file = root / "public" / "merchant-skill" / "SKILL.md"
+    skill_file.write_text(skill_file.read_text(encoding="utf-8") + "\n/Users/example/private/workspace\n", encoding="utf-8")
+    _write_taxonomy(root)
+
+    with pytest.raises(BusinessCatalogError, match="host-local absolute path"):
+        read_business_skill_content(LocalSkillStorage(host_path=str(root)), "merchant-skill")
+
+
 def test_content_rejects_custom_skills_and_invalid_names(tmp_path: Path) -> None:
     root = tmp_path / "skills"
     (root / "public").mkdir(parents=True)
@@ -129,19 +161,31 @@ def test_read_only_business_catalog_api_returns_grouping_content_and_etag(tmp_pa
     _write_taxonomy(root)
     storage = LocalSkillStorage(host_path=str(root))
     app = FastAPI()
+
+    @app.get("/api/private")
+    async def private_route() -> dict[str, bool]:
+        return {"ok": True}
+
+    app.add_middleware(AuthMiddleware)
     app.dependency_overrides[get_config] = lambda: object()
     monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda _config: storage)
+    monkeypatch.setattr(internal_auth, "_SKILL_CATALOG_AUTH_TOKEN", "catalog-read-token")
     app.include_router(skills_router.router)
 
     with TestClient(app) as client:
-        catalog_response = client.get("/api/skills/business-catalog")
-        detail_response = client.get("/api/skills/business-catalog/merchant-skill")
-        missing_response = client.get("/api/skills/business-catalog/missing-skill")
+        headers = {"X-DeerFlow-Skill-Catalog-Token": "catalog-read-token"}
+        unauthenticated_response = client.get("/api/skills/business-catalog")
+        out_of_scope_response = client.get("/api/private", headers=headers)
+        catalog_response = client.get("/api/skills/business-catalog", headers=headers)
+        detail_response = client.get("/api/skills/business-catalog/merchant-skill", headers=headers)
+        missing_response = client.get("/api/skills/business-catalog/missing-skill", headers=headers)
 
+    assert unauthenticated_response.status_code == 401
+    assert out_of_scope_response.status_code == 401
     assert catalog_response.status_code == 200
     assert catalog_response.json()["business_units"][0]["name"] == "得物"
     assert catalog_response.headers["etag"].startswith('"')
     assert detail_response.status_code == 200
     assert detail_response.json()["content"].startswith("---")
-    assert detail_response.headers["etag"] == f'"{detail_response.json()["content_sha256"]}"'
+    assert detail_response.headers["etag"] == f'"{detail_response.json()["detail_sha256"]}"'
     assert missing_response.status_code == 404

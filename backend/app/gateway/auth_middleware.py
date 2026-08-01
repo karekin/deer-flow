@@ -55,9 +55,19 @@ _PUBLIC_EXACT_PATHS: frozenset[str] = frozenset(
 )
 
 
+def _is_skill_catalog_path(path: str) -> bool:
+    stripped = path.rstrip("/")
+    base = "/api/skills/business-catalog"
+    return stripped == base or stripped.startswith(f"{base}/")
+
+
 def _is_public(path: str) -> bool:
     stripped = path.rstrip("/")
     if stripped in _PUBLIC_EXACT_PATHS:
+        return True
+    # These read-only routes enforce their own audience-limited service token
+    # in the router, so Yudao never receives the Gateway-wide super-token.
+    if _is_skill_catalog_path(path):
         return True
     return any(path.startswith(prefix) for prefix in _PUBLIC_PATH_PREFIXES)
 
