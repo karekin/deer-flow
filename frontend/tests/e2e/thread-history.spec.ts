@@ -53,6 +53,35 @@ test.describe("Thread history", () => {
     await expect(page).toHaveURL(new RegExp(MOCK_THREAD_ID));
   });
 
+  test("clicking blank space in a sidebar thread row navigates to it", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, { threads: THREADS });
+
+    await page.goto("/workspace/chats/new");
+
+    const sidebar = page.locator("[data-sidebar='sidebar']");
+    const firstThreadItem = sidebar
+      .locator("[data-sidebar='menu-item']")
+      .filter({ hasText: "First conversation" })
+      .first();
+    await expect(firstThreadItem).toBeVisible({ timeout: 15_000 });
+
+    const firstThreadLink = firstThreadItem.getByRole("link");
+    await expect(firstThreadLink).toBeVisible();
+
+    const box = await firstThreadLink.boundingBox();
+    expect(box).not.toBeNull();
+    if (!box) {
+      return;
+    }
+
+    await firstThreadLink.click({ position: { x: 4, y: box.height / 2 } });
+
+    await page.waitForURL(`**/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(page).toHaveURL(new RegExp(MOCK_THREAD_ID));
+  });
+
   test("existing thread loads historical messages", async ({ page }) => {
     mockLangGraphAPI(page, { threads: THREADS });
 
@@ -63,6 +92,274 @@ test.describe("Thread history", () => {
     await expect(
       page.getByText("Response in thread First conversation"),
     ).toBeVisible({ timeout: 15_000 });
+  });
+
+  test("keeps rendered messages ordered when the latest history page advances", async ({
+    page,
+  }) => {
+    const originalPrompt = "/ppt-master Build the quarterly presentation";
+    const followUpPrompt = "Continue with the approved default layout";
+    const olderRows = Array.from({ length: 50 }, (_, index) => {
+      const seq = index + 1;
+      if (index === 0) {
+        return {
+          run_id: "run-initial",
+          seq,
+          content: {
+            type: "human",
+            id: "history-prompt",
+            content: [{ type: "text", text: originalPrompt }],
+          },
+          metadata: { caller: "lead_agent" },
+          created_at: "2025-06-03T12:00:00Z",
+        };
+      }
+      if (index === 1) {
+        return {
+          run_id: "run-initial",
+          seq,
+          content: {
+            type: "ai",
+            id: "history-answer",
+            content: "Initial design is ready",
+          },
+          metadata: { caller: "lead_agent" },
+          created_at: "2025-06-03T12:00:01Z",
+        };
+      }
+      return {
+        run_id: "run-initial",
+        seq,
+        content: {
+          type: "ai",
+          id: `history-step-${seq}`,
+          content: `Historical presentation step ${seq}`,
+          ...(index === 49
+            ? { additional_kwargs: { turn_duration: 704 } }
+            : {}),
+        },
+        metadata: { caller: "lead_agent" },
+        created_at: "2025-06-03T12:00:02Z",
+      };
+    });
+    const initialRows = Array.from({ length: 50 }, (_, index) => {
+      const seq = index + 51;
+      return {
+        run_id: "run-initial",
+        seq,
+        content: {
+          type: "ai",
+          id: `history-step-${seq}`,
+          content: `Historical presentation step ${seq}`,
+        },
+        metadata: { caller: "lead_agent" },
+        created_at: "2025-06-03T12:00:03Z",
+      };
+    });
+    const shiftedRows = Array.from({ length: 50 }, (_, index) => {
+      const seq = index + 101;
+      return {
+        run_id: "run-shifted",
+        seq,
+        content: {
+          type: "ai",
+          id: `shifted-step-${seq}`,
+          content: `New presentation step ${seq}`,
+        },
+        metadata: { caller: "lead_agent" },
+        created_at: "2025-06-03T12:01:00Z",
+      };
+    });
+    let latestPageRequestCount = 0;
+    let cursorPageRequestCount = 0;
+
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Long presentation task",
+          updated_at: "2025-06-03T12:00:00Z",
+          // This scenario exercises persisted run-event pagination. Keep the
+          // checkpoint empty so its generic mock messages do not interfere
+          // with optimistic -> server reconciliation after the follow-up.
+          messages: [],
+        },
+      ],
+    });
+    await page.route(
+      new RegExp(`/api/threads/${MOCK_THREAD_ID}/messages/page(?:\\?.*)?$`),
+      async (route) => {
+        if (route.request().method() !== "GET") {
+          return route.fallback();
+        }
+
+        const beforeSeq = new URL(route.request().url()).searchParams.get(
+          "before_seq",
+        );
+        const isLatestPage = beforeSeq === null;
+        const rows = isLatestPage
+          ? latestPageRequestCount === 0
+            ? initialRows
+            : shiftedRows
+          : beforeSeq === "101"
+            ? initialRows
+            : olderRows;
+        const hasMore = isLatestPage || beforeSeq === "101";
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            data: rows,
+            has_more: hasMore,
+            next_before_seq: hasMore ? (rows[0]?.seq ?? null) : null,
+          }),
+        });
+        if (isLatestPage) {
+          latestPageRequestCount += 1;
+        } else {
+          cursorPageRequestCount += 1;
+        }
+      },
+    );
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect
+      .poll(() => cursorPageRequestCount, { timeout: 15_000 })
+      .toBeGreaterThan(0);
+    await expect(page.getByText(originalPrompt)).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(page.getByText("Completed in 11m 44s")).toBeVisible();
+
+    const latestPageRequestsBeforeSubmit = latestPageRequestCount;
+    const textarea = page.locator("textarea[name='message']");
+    await textarea.fill(followUpPrompt);
+    await textarea.press("Enter");
+
+    await expect
+      .poll(() => latestPageRequestCount, { timeout: 15_000 })
+      .toBeGreaterThan(latestPageRequestsBeforeSubmit);
+    await expect(page.getByText(originalPrompt)).toBeVisible();
+    await expect(page.getByText(followUpPrompt)).toBeVisible();
+    await expect(page.getByText("Completed in 11m 44s")).toBeVisible();
+
+    const originalBox = await page.getByText(originalPrompt).boundingBox();
+    const followUpBox = await page.getByText(followUpPrompt).boundingBox();
+    expect(originalBox).not.toBeNull();
+    expect(followUpBox).not.toBeNull();
+    expect(originalBox!.y).toBeLessThan(followUpBox!.y);
+  });
+
+  test("shows a completed run duration once after multi-step history", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Multi-step duration",
+          updated_at: "2025-06-03T12:00:00Z",
+          messages: [
+            {
+              type: "human",
+              id: "msg-human-duration",
+              content: [{ type: "text", text: "Complete several steps" }],
+            },
+            {
+              type: "ai",
+              id: "msg-ai-duration-1",
+              content: "Intermediate result",
+              additional_kwargs: { turn_duration: 114 },
+            },
+            {
+              type: "ai",
+              id: "msg-ai-duration-2",
+              content: "Final result",
+              additional_kwargs: {
+                turn_duration: 114,
+                reasoning_content: "Final synthesis reasoning",
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(page.getByText("Final result")).toBeVisible({
+      timeout: 15_000,
+    });
+
+    await expect(page.getByTestId("run-duration")).toHaveCount(1);
+    await expect(page.getByText("Completed in 1m 54s")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Reasoning", exact: true }),
+    ).toBeVisible();
+    await expect(page.getByText("Thought for 114 seconds")).toHaveCount(0);
+  });
+
+  test("input box recalls previous prompts with arrow keys", async ({
+    page,
+  }) => {
+    const firstPrompt = "Summarize the latest quarterly report";
+    const secondPrompt = "Turn the summary into an action plan";
+
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Prompt history conversation",
+          updated_at: "2025-06-03T12:00:00Z",
+          messages: [
+            {
+              type: "human",
+              id: "msg-human-prompt-history-1",
+              content: [{ type: "text", text: firstPrompt }],
+            },
+            {
+              type: "ai",
+              id: "msg-ai-prompt-history-1",
+              content: "First answer",
+            },
+            {
+              type: "human",
+              id: "msg-human-prompt-history-2",
+              content: [{ type: "text", text: secondPrompt }],
+            },
+            {
+              type: "ai",
+              id: "msg-ai-prompt-history-2",
+              content: "Second answer",
+            },
+          ],
+        },
+      ],
+    });
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(page.getByText("Second answer")).toBeVisible({
+      timeout: 15_000,
+    });
+
+    const textarea = page.locator("textarea[name='message']");
+    await expect(textarea).toBeVisible();
+
+    await textarea.focus();
+    await textarea.press("ArrowUp");
+    await expect(textarea).toHaveValue(secondPrompt);
+
+    await textarea.press("ArrowUp");
+    await expect(textarea).toHaveValue(firstPrompt);
+
+    await textarea.press("ArrowDown");
+    await expect(textarea).toHaveValue(secondPrompt);
+
+    await textarea.press("ArrowDown");
+    await expect(textarea).toHaveValue("");
+
+    await textarea.fill("draft should not be overwritten");
+    await textarea.press("ArrowUp");
+    await expect(textarea).toHaveValue("draft should not be overwritten");
   });
 
   test("deleting an inactive chat keeps the current chat open", async ({
@@ -200,6 +497,43 @@ test.describe("Thread history", () => {
 
     await expect(page.getByText(OPTIMISTIC_PROMPT_MARKER)).toHaveCount(0);
     await expect(page.getByPlaceholder(/how can i assist you/i)).toBeVisible();
+  });
+
+  test("new chat resets immediately after a history-only thread URL update", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page);
+
+    await page.goto("/workspace/chats/new");
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await textarea.fill("Message that must disappear in the next new chat");
+    await textarea.press("Enter");
+    await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
+      timeout: 15_000,
+    });
+
+    // A newly created chat changes the URL with history.replaceState so the
+    // active stream is not remounted. Reproduce that history-only transition:
+    // the canonical pathname becomes the UUID while useParams can stay "new".
+    await page.evaluate((threadId) => {
+      history.replaceState(null, "", `/workspace/chats/${threadId}`);
+    }, MOCK_THREAD_ID);
+
+    const newChatLink = page.locator(
+      "[data-sidebar='sidebar'] a[href='/workspace/chats/new']",
+    );
+    await expect(page).toHaveURL(
+      new RegExp(`/workspace/chats/${MOCK_THREAD_ID}$`),
+    );
+    await expect(newChatLink).toHaveAttribute("data-active", "false");
+
+    // One click must reset the chat without a second click or unrelated UI
+    // interaction forcing another render.
+    await newChatLink.click();
+    await expect(page).toHaveURL(/\/workspace\/chats\/new$/);
+    await expect(page.getByText("Hello from DeerFlow!")).toHaveCount(0);
+    await expect(textarea).toBeVisible();
   });
 
   test("deleting the active newly created chat returns to the new chat screen", async ({

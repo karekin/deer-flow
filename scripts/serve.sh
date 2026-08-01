@@ -105,7 +105,7 @@ _is_deerflow_pid() {
         return 0
     fi
 
-    files=$(lsof -p "$pid" 2>/dev/null) || return 1
+    files=$(lsof -b -w -p "$pid" 2>/dev/null) || return 1
     while IFS= read -r root; do
         [ -n "$root" ] || continue
         case "$files" in
@@ -122,7 +122,7 @@ _report_reclaimed_ports() {
     for port in 8001 3000 2026; do
         for pid in $(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null); do
             _is_deerflow_pid "$pid" || continue
-            files=$(lsof -p "$pid" 2>/dev/null)
+            files=$(lsof -b -w -p "$pid" 2>/dev/null)
             case "$files" in *"$REPO_ROOT"/*) continue ;; esac  # this worktree — normal
             owner=""
             while IFS= read -r root; do
@@ -203,8 +203,10 @@ _is_repo_nginx_pid() {
     local args
 
     command=$(ps -p "$pid" -o comm= 2>/dev/null) || return 1
+    # nginx rewrites argv[0] for master/worker processes. On macOS,
+    # `ps -o comm=` can report that rewritten form instead of the binary name.
     case "$command" in
-        nginx|*/nginx) ;;
+        nginx|*/nginx|nginx:*) ;;
         *) return 1 ;;
     esac
 
@@ -291,15 +293,20 @@ if $DAEMON_MODE; then
     MODE_LABEL="$MODE_LABEL [daemon]"
 fi
 
+# Resolve pnpm through the same runner used by make check/install. Exporting
+# these values keeps paths with spaces intact when run_service invokes sh -c.
+if ! DEERFLOW_PNPM_PYTHON="$(_pick_python)"; then
+    echo "Python 3 is required to run pnpm."
+    exit 1
+fi
+DEERFLOW_PNPM_RUNNER="$REPO_ROOT/scripts/pnpm.py"
+export DEERFLOW_PNPM_PYTHON DEERFLOW_PNPM_RUNNER
+
 # Frontend command
 if $DEV_MODE; then
-    FRONTEND_CMD="pnpm run dev"
+    FRONTEND_CMD='"$DEERFLOW_PNPM_PYTHON" "$DEERFLOW_PNPM_RUNNER" run dev'
 else
-    if ! PYTHON_BIN="$(_pick_python)"; then
-        echo "Python is required to generate BETTER_AUTH_SECRET."
-        exit 1
-    fi
-    FRONTEND_CMD="env BETTER_AUTH_SECRET=$($PYTHON_BIN -c 'import secrets; print(secrets.token_hex(16))') pnpm run preview"
+    FRONTEND_CMD="env BETTER_AUTH_SECRET=$($DEERFLOW_PNPM_PYTHON -c 'import secrets; print(secrets.token_hex(16))') \"\$DEERFLOW_PNPM_PYTHON\" \"\$DEERFLOW_PNPM_RUNNER\" run preview"
 fi
 
 # Runtime path defaults. Local `make dev` launches Gateway from `backend/`,
@@ -384,7 +391,7 @@ if ! $SKIP_INSTALL; then
     # in particular). Required for postgres extras — see PR #2584.
     # Intentionally unquoted to splat multiple `--extra X` pairs.
     (cd backend && uv sync --quiet --all-packages $UV_EXTRAS_FLAGS) || { echo "✗ Backend dependency install failed"; exit 1; }
-    (cd frontend && pnpm install --silent) || { echo "✗ Frontend dependency install failed"; exit 1; }
+    (cd frontend && "$DEERFLOW_PNPM_PYTHON" "$DEERFLOW_PNPM_RUNNER" install --silent) || { echo "✗ Frontend dependency install failed"; exit 1; }
     echo "✓ Dependencies synced"
 else
     echo "⏩ Skipping dependency install (--skip-install)"

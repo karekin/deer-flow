@@ -41,7 +41,7 @@ def _call_setup_agent(
     display_name: str | None = None,
 ):
     """Call the underlying setup_agent function directly, bypassing langchain tool wrapper."""
-    with patch("deerflow.tools.builtins.setup_agent_tool.get_paths", return_value=_make_paths_mock(tmp_path)):
+    with patch("deerflow.tools.builtins.setup_agent_tool.get_paths", return_value=_make_paths_mock(tmp_path)), patch("deerflow.config.agents_config.get_paths", return_value=_make_paths_mock(tmp_path)):
         return setup_agent.func(
             soul=soul,
             description=description,
@@ -96,9 +96,9 @@ class TestSetupAgentNoDataLoss:
         old_soul = agent_dir / "SOUL.md"
         old_soul.write_text("original soul content", encoding="utf-8")
 
-        with patch("deerflow.tools.builtins.setup_agent_tool.get_paths", return_value=_make_paths_mock(tmp_path)):
+        with patch("deerflow.tools.builtins.setup_agent_tool.get_paths", return_value=_make_paths_mock(tmp_path)), patch("deerflow.config.agents_config.get_paths", return_value=_make_paths_mock(tmp_path)):
             # Force soul_file.write_text to raise after directory already exists
-            with patch.object(Path, "write_text", side_effect=OSError("disk full")):
+            with patch("yaml.dump", side_effect=OSError("disk full")):
                 setup_agent.func(
                     soul="new soul",
                     description="desc",
@@ -116,7 +116,7 @@ class TestSetupAgentNoDataLoss:
         agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "test-agent"
         assert not agent_dir.exists()
 
-        with patch("deerflow.tools.builtins.setup_agent_tool.get_paths", return_value=_make_paths_mock(tmp_path)):
+        with patch("deerflow.tools.builtins.setup_agent_tool.get_paths", return_value=_make_paths_mock(tmp_path)), patch("deerflow.config.agents_config.get_paths", return_value=_make_paths_mock(tmp_path)):
             with patch("yaml.dump", side_effect=OSError("write error")):
                 setup_agent.func(
                     soul="new soul",
@@ -156,7 +156,7 @@ class TestSetupAgentNoDataLoss:
             tool_call_id="tool-3",
         )
 
-        with patch("deerflow.tools.builtins.setup_agent_tool.get_paths", return_value=_make_paths_mock(tmp_path)):
+        with patch("deerflow.tools.builtins.setup_agent_tool.get_paths", return_value=_make_paths_mock(tmp_path)), patch("deerflow.config.agents_config.get_paths", return_value=_make_paths_mock(tmp_path)):
             setup_agent.func(
                 soul="# My Agent",
                 description="A test agent",
@@ -204,7 +204,7 @@ class TestSetupAgentEmptySoulGuard:
         global_soul = tmp_path / "SOUL.md"
         global_soul.write_text("original global soul", encoding="utf-8")
 
-        with patch("deerflow.tools.builtins.setup_agent_tool.get_paths", return_value=_make_paths_mock(tmp_path)):
+        with patch("deerflow.tools.builtins.setup_agent_tool.get_paths", return_value=_make_paths_mock(tmp_path)), patch("deerflow.config.agents_config.get_paths", return_value=_make_paths_mock(tmp_path)):
             setup_agent.func(
                 soul="",
                 description="desc",

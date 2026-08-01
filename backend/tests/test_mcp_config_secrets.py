@@ -3,10 +3,13 @@
 Verifies that GET /api/mcp/config masks sensitive fields (env values,
 header values, OAuth secrets) and that PUT /api/mcp/config correctly
 preserves existing secrets when the frontend round-trips masked values.
+PATCH /api/mcp/config coverage pins targeted state changes, raw-config
+preservation, transport aliases, authorization, and command validation.
 """
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -20,12 +23,15 @@ from app.gateway.routers.mcp import (
     McpConfigUpdateRequest,
     McpOAuthConfigResponse,
     McpServerConfigResponse,
+    McpServerStateUpdateRequest,
     _mask_server_config,
     _merge_preserving_secrets,
     _validate_mcp_update_request,
     reset_mcp_tools_cache_endpoint,
     update_mcp_configuration,
+    update_mcp_server_state,
 )
+from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
 
 # ---------------------------------------------------------------------------
 # _mask_server_config
@@ -108,6 +114,26 @@ def test_mask_does_not_mutate_original():
     masked = _mask_server_config(server)
     assert server.env["KEY"] == "secret"
     assert masked.env["KEY"] == "***"
+
+
+def test_mask_scrubs_sensitive_extra_fields_but_preserves_safe_extra_fields():
+    """Unknown advanced fields are preserved, but secret-shaped keys are masked."""
+    server = McpServerConfigResponse(
+        cwd="/srv/mcp-workdir",
+        customFlag="keep-me",
+        api_key="real-extra-secret",
+        nested={"refreshToken": "refresh-secret", "safe": "visible"},
+        endpoints=[{"access_key": "access-secret", "name": "prod"}],
+    )
+
+    masked = _mask_server_config(server)
+
+    assert masked.model_extra["cwd"] == "/srv/mcp-workdir"
+    assert masked.model_extra["customFlag"] == "keep-me"
+    assert masked.model_extra["api_key"] == "***"
+    assert masked.model_extra["nested"] == {"refreshToken": "***", "safe": "visible"}
+    assert masked.model_extra["endpoints"] == [{"access_key": "***", "name": "prod"}]
+    assert server.model_extra["api_key"] == "real-extra-secret"
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +225,41 @@ def test_merge_does_not_mutate_original():
     assert incoming.env["KEY"] == "***"
     assert existing.env["KEY"] == "secret"
     assert merged.env["KEY"] == "secret"
+
+
+def test_merge_preserves_masked_sensitive_extra_values():
+    """Masked secret-shaped extra fields should round-trip to existing values."""
+    incoming = McpServerConfigResponse(
+        cwd="/srv/new-workdir",
+        api_key="***",
+        nested={"refreshToken": "***", "safe": "updated"},
+        endpoints=[{"access_key": "***", "name": "prod"}],
+    )
+    existing = McpServerConfigResponse(
+        cwd="/srv/old-workdir",
+        api_key="real-extra-secret",
+        nested={"refreshToken": "real-refresh", "safe": "old"},
+        endpoints=[{"access_key": "real-access", "name": "prod"}],
+    )
+
+    merged = _merge_preserving_secrets(incoming, existing)
+
+    assert merged.model_extra["cwd"] == "/srv/new-workdir"
+    assert merged.model_extra["api_key"] == "real-extra-secret"
+    assert merged.model_extra["nested"] == {"refreshToken": "real-refresh", "safe": "updated"}
+    assert merged.model_extra["endpoints"] == [{"access_key": "real-access", "name": "prod"}]
+
+
+def test_merge_rejects_masked_sensitive_extra_value_for_new_key():
+    """A new unknown secret field must provide a real value, not a mask."""
+    incoming = McpServerConfigResponse(api_key="***")
+    existing = McpServerConfigResponse()
+
+    with pytest.raises(HTTPException) as exc_info:
+        _merge_preserving_secrets(incoming, existing)
+
+    assert exc_info.value.status_code == 400
+    assert "api_key" in exc_info.value.detail
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +469,326 @@ async def test_update_mcp_configuration_resets_tools_cache(monkeypatch, tmp_path
     assert list(response.mcp_servers) == ["github"]
 
 
+@pytest.mark.asyncio
+async def test_update_mcp_configuration_preserves_omitted_routing_and_tools(monkeypatch, tmp_path):
+    """Frontend toggles must not erase hand-authored MCP routing hints."""
+    config_path = tmp_path / "extensions_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "postgres": {
+                        "enabled": True,
+                        "type": "stdio",
+                        "command": "npx",
+                        "args": ["-y", "@modelcontextprotocol/server-postgres"],
+                        "routing": {
+                            "mode": "prefer",
+                            "priority": 50,
+                            "keywords": ["订单", "SQL"],
+                        },
+                        "tools": {
+                            "query": {
+                                "routing": {
+                                    "priority": 100,
+                                    "keywords": ["查库"],
+                                }
+                            }
+                        },
+                    }
+                },
+                "skills": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    current_config = SimpleNamespace(skills={}, mcp_servers={})
+
+    def fake_reload_extensions_config():
+        return ExtensionsConfig.model_validate(json.loads(config_path.read_text(encoding="utf-8")))
+
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
+    monkeypatch.setattr(mcp_router, "get_extensions_config", lambda: current_config)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
+    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+
+    response = await update_mcp_configuration(
+        _request_with_role("admin"),
+        McpConfigUpdateRequest(
+            mcp_servers={
+                "postgres": McpServerConfigResponse(
+                    enabled=False,
+                    type="stdio",
+                    command="npx",
+                    args=["-y", "@modelcontextprotocol/server-postgres"],
+                )
+            }
+        ),
+    )
+
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    postgres = persisted["mcpServers"]["postgres"]
+    assert postgres["enabled"] is False
+    assert postgres["routing"]["keywords"] == ["订单", "SQL"]
+    assert postgres["tools"]["query"]["routing"]["priority"] == 100
+    assert response.mcp_servers["postgres"].routing.keywords == ["订单", "SQL"]
+
+
+@pytest.mark.asyncio
+async def test_update_mcp_configuration_preserves_server_extra_fields(monkeypatch, tmp_path):
+    """Gateway round-trips must preserve advanced server fields unknown to the API model."""
+    config_path = tmp_path / "extensions_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "playwright": {
+                        "enabled": True,
+                        "type": "stdio",
+                        "command": "npx",
+                        "args": ["-y", "@playwright/mcp"],
+                        "cwd": "/srv/mcp-workdir",
+                        "customFlag": "keep-me",
+                        "api_key": "real-extra-secret",
+                    }
+                },
+                "skills": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    current_config = SimpleNamespace(skills={}, mcp_servers={})
+
+    def fake_reload_extensions_config():
+        return ExtensionsConfig.model_validate(json.loads(config_path.read_text(encoding="utf-8")))
+
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
+    monkeypatch.setattr(mcp_router, "get_extensions_config", lambda: current_config)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
+    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+
+    response = await update_mcp_configuration(
+        _request_with_role("admin"),
+        McpConfigUpdateRequest(
+            mcp_servers={
+                "playwright": McpServerConfigResponse(
+                    enabled=False,
+                    type="stdio",
+                    command="npx",
+                    args=["-y", "@playwright/mcp"],
+                )
+            }
+        ),
+    )
+
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    playwright = persisted["mcpServers"]["playwright"]
+    assert playwright["enabled"] is False
+    assert playwright["cwd"] == "/srv/mcp-workdir"
+    assert playwright["customFlag"] == "keep-me"
+    assert playwright["api_key"] == "real-extra-secret"
+    assert response.mcp_servers["playwright"].model_extra["cwd"] == "/srv/mcp-workdir"
+    assert response.mcp_servers["playwright"].model_extra["api_key"] == "***"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_update_mcp_server_state_updates_valid_target_despite_unrelated_disallowed_command(
+    monkeypatch,
+    tmp_path,
+    enabled: bool,
+):
+    config_path = tmp_path / "extensions_config.json"
+    original = {
+        "mcpServers": {
+            "semantic-scholar": {
+                "enabled": True,
+                "type": "stdio",
+                "command": "s2-mcp-server",
+                "env": {"S2_API_KEY": "$S2_API_KEY"},
+                "customFlag": "keep-me",
+            },
+            "github": {
+                "enabled": not enabled,
+                "type": "stdio",
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-github"],
+            },
+        },
+        "skills": {"research": {"enabled": False}},
+        "middlewares": ["example.middleware:Middleware"],
+        "customTopLevel": {"preserve": True},
+    }
+    config_path.write_text(json.dumps(original), encoding="utf-8")
+    reset_calls = 0
+
+    def fake_reload_extensions_config():
+        return ExtensionsConfig.model_validate(json.loads(config_path.read_text(encoding="utf-8")))
+
+    def fake_reset_mcp_tools_cache():
+        nonlocal reset_calls
+        reset_calls += 1
+
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
+    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", fake_reset_mcp_tools_cache)
+    monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
+
+    response = await update_mcp_server_state(
+        _request_with_role("admin"),
+        McpServerStateUpdateRequest(server_name="github", enabled=enabled),
+    )
+
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["mcpServers"]["github"]["enabled"] is enabled
+    assert persisted["mcpServers"]["semantic-scholar"] == original["mcpServers"]["semantic-scholar"]
+    assert persisted["skills"] == original["skills"]
+    assert persisted["middlewares"] == original["middlewares"]
+    assert persisted["customTopLevel"] == original["customTopLevel"]
+    assert response.mcp_servers["github"].enabled is enabled
+    assert response.mcp_servers["semantic-scholar"].env == {"S2_API_KEY": "***"}
+    assert reset_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_update_mcp_server_state_allows_disabling_but_rejects_enabling_disallowed_command(monkeypatch, tmp_path):
+    config_path = tmp_path / "extensions_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "semantic-scholar": {
+                        "enabled": True,
+                        "type": "stdio",
+                        "command": "s2-mcp-server",
+                    }
+                },
+                "skills": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    reset_calls = 0
+
+    def fake_reload_extensions_config():
+        return ExtensionsConfig.model_validate(json.loads(config_path.read_text(encoding="utf-8")))
+
+    def fake_reset_mcp_tools_cache():
+        nonlocal reset_calls
+        reset_calls += 1
+
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
+    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", fake_reset_mcp_tools_cache)
+    monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
+
+    response = await update_mcp_server_state(
+        _request_with_role("admin"),
+        McpServerStateUpdateRequest(server_name="semantic-scholar", enabled=False),
+    )
+    assert response.mcp_servers["semantic-scholar"].enabled is False
+
+    with pytest.raises(HTTPException) as exc_info:
+        await update_mcp_server_state(
+            _request_with_role("admin"),
+            McpServerStateUpdateRequest(server_name="semantic-scholar", enabled=True),
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "s2-mcp-server" in exc_info.value.detail
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["mcpServers"]["semantic-scholar"]["enabled"] is False
+    assert reset_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["sse", "http"])
+async def test_update_mcp_server_state_enables_raw_transport_alias(
+    monkeypatch,
+    tmp_path,
+    transport: str,
+):
+    config_path = tmp_path / "extensions_config.json"
+    original_server = {
+        "enabled": False,
+        "transport": transport,
+        "url": "https://mcp.example.com/mcp",
+        "customFlag": "keep-me",
+    }
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {"remote": original_server},
+                "skills": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    reset_calls = 0
+
+    def fake_reload_extensions_config():
+        return ExtensionsConfig.model_validate(json.loads(config_path.read_text(encoding="utf-8")))
+
+    def fake_reset_mcp_tools_cache():
+        nonlocal reset_calls
+        reset_calls += 1
+
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
+    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", fake_reset_mcp_tools_cache)
+    monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
+
+    response = await update_mcp_server_state(
+        _request_with_role("admin"),
+        McpServerStateUpdateRequest(server_name="remote", enabled=True),
+    )
+
+    persisted_server = json.loads(config_path.read_text(encoding="utf-8"))["mcpServers"]["remote"]
+    assert persisted_server == {**original_server, "enabled": True}
+    assert "type" not in persisted_server
+    assert response.mcp_servers["remote"].enabled is True
+    assert response.mcp_servers["remote"].type == transport
+    assert reset_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_update_mcp_server_state_returns_404_without_writing_or_resetting_cache(monkeypatch, tmp_path):
+    config_path = tmp_path / "extensions_config.json"
+    original_text = '{"mcpServers": {}, "skills": {}}'
+    config_path.write_text(original_text, encoding="utf-8")
+    reset_calls = 0
+
+    def fake_reset_mcp_tools_cache():
+        nonlocal reset_calls
+        reset_calls += 1
+
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
+    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", fake_reset_mcp_tools_cache)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await update_mcp_server_state(
+            _request_with_role("admin"),
+            McpServerStateUpdateRequest(server_name="missing", enabled=True),
+        )
+
+    assert exc_info.value.status_code == 404
+    assert config_path.read_text(encoding="utf-8") == original_text
+    assert reset_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_update_mcp_server_state_requires_admin():
+    with pytest.raises(HTTPException) as exc_info:
+        await update_mcp_server_state(
+            _request_with_role("user"),
+            McpServerStateUpdateRequest(server_name="github", enabled=False),
+        )
+
+    assert exc_info.value.status_code == 403
+
+
 def test_validate_mcp_update_allows_default_npx_stdio_command(monkeypatch):
     monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
     request = McpConfigUpdateRequest(
@@ -508,3 +889,48 @@ def test_validate_mcp_update_ignores_remote_transports(monkeypatch):
     )
 
     _validate_mcp_update_request(request)
+
+
+@pytest.mark.parametrize(
+    ("raw_server", "expected_type"),
+    [
+        ({"transport": "sse", "url": "https://mcp.example.com/sse"}, "sse"),
+        ({"transport": "http", "url": "https://mcp.example.com/mcp"}, "http"),
+        ({"transport": "stdio", "command": "npx"}, "stdio"),
+        ({"type": "http", "transport": "sse", "url": "https://mcp.example.com/mcp"}, "http"),
+        ({}, "stdio"),
+    ],
+)
+def test_api_and_runtime_mcp_models_normalize_transport_consistently(
+    raw_server: dict[str, object],
+    expected_type: str,
+):
+    api_server = McpServerConfigResponse.model_validate(raw_server)
+    runtime_server = McpServerConfig.model_validate(raw_server)
+
+    assert api_server.type == expected_type
+    assert runtime_server.type == expected_type
+    assert api_server.type == runtime_server.type
+    if "transport" in raw_server:
+        assert api_server.model_extra["transport"] == raw_server["transport"]
+        assert runtime_server.model_extra["transport"] == raw_server["transport"]
+
+
+def test_validate_mcp_update_enforces_stdio_transport_alias(monkeypatch):
+    monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
+    request = McpConfigUpdateRequest.model_validate(
+        {
+            "mcp_servers": {
+                "disallowed": {
+                    "transport": "stdio",
+                    "command": "custom-mcp-server",
+                }
+            }
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        _validate_mcp_update_request(request)
+
+    assert exc_info.value.status_code == 400
+    assert "custom-mcp-server" in exc_info.value.detail

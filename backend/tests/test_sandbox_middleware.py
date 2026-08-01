@@ -9,7 +9,7 @@ from langchain.tools import ToolRuntime
 from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
-from langgraph.types import Command
+from langgraph.types import Command, Overwrite
 
 from deerflow.agents.thread_state import ThreadState
 from deerflow.sandbox.middleware import SandboxMiddleware, SandboxMiddlewareState
@@ -22,9 +22,11 @@ from deerflow.sandbox.tools import ls_tool
 class _SyncProvider(SandboxProvider):
     def __init__(self) -> None:
         self.thread_ids: list[str | None] = []
+        self.user_ids: list[str | None] = []
 
-    def acquire(self, thread_id: str | None = None) -> str:
+    def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         self.thread_ids.append(thread_id)
+        self.user_ids.append(user_id)
         return "sync-sandbox"
 
     def get(self, sandbox_id: str) -> Sandbox | None:
@@ -35,10 +37,21 @@ class _SyncProvider(SandboxProvider):
 
 
 class _SandboxStub(Sandbox):
-    def execute_command(self, command: str) -> str:
+    def execute_command(
+        self,
+        command: str,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> str:
+        del env, timeout
         return "OK"
 
-    def read_file(self, path: str) -> str:
+    def read_file(
+        self,
+        path: str,
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> str:
         return "content"
 
     def download_file(self, path: str) -> bytes:
@@ -72,14 +85,17 @@ class _SandboxStub(Sandbox):
 class _AsyncOnlyProvider(SandboxProvider):
     def __init__(self) -> None:
         self.thread_ids: list[str | None] = []
+        self.user_ids: list[str | None] = []
         self.released_ids: list[str] = []
         self.sandbox = _SandboxStub("async-sandbox")
 
-    def acquire(self, thread_id: str | None = None) -> str:
+    def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
+        del user_id
         raise AssertionError("async middleware should not call sync acquire")
 
-    async def acquire_async(self, thread_id: str | None = None) -> str:
+    async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         self.thread_ids.append(thread_id)
+        self.user_ids.append(user_id)
         return "async-sandbox"
 
     def get(self, sandbox_id: str) -> Sandbox | None:
@@ -105,9 +121,9 @@ async def test_provider_default_acquire_async_offloads_sync_acquire(monkeypatch:
     provider = _SyncProvider()
     calls: list[tuple[object, tuple[object, ...]]] = []
 
-    async def fake_to_thread(func, /, *args):
-        calls.append((func, args))
-        return func(*args)
+    async def fake_to_thread(func, /, *args, **kwargs):
+        calls.append((func, args, kwargs))
+        return func(*args, **kwargs)
 
     monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
 
@@ -115,7 +131,8 @@ async def test_provider_default_acquire_async_offloads_sync_acquire(monkeypatch:
 
     assert sandbox_id == "sync-sandbox"
     assert provider.thread_ids == ["thread-1"]
-    assert calls == [(provider.acquire, ("thread-1",))]
+    assert provider.user_ids == [None]
+    assert calls == [(provider.acquire, ("thread-1",), {"user_id": None})]
 
 
 @pytest.mark.anyio
@@ -125,12 +142,13 @@ async def test_abefore_agent_uses_async_provider_acquire() -> None:
     try:
         middleware = SandboxMiddleware(lazy_init=False)
 
-        result = await middleware.abefore_agent({}, Runtime(context={"thread_id": "thread-2"}))
+        result = await middleware.abefore_agent({}, Runtime(context={"thread_id": "thread-2", "user_id": "owner-2"}))
     finally:
         reset_sandbox_provider()
 
     assert result == {"sandbox": {"sandbox_id": "async-sandbox"}}
     assert provider.thread_ids == ["thread-2"]
+    assert provider.user_ids == ["owner-2"]
 
 
 @pytest.mark.anyio
@@ -169,7 +187,7 @@ async def test_default_lazy_tool_acquisition_uses_async_provider() -> None:
     try:
         runtime = ToolRuntime(
             state={},
-            context={"thread_id": "thread-lazy"},
+            context={"thread_id": "thread-lazy", "user_id": "owner-lazy"},
             config={"configurable": {}},
             stream_writer=lambda _: None,
             tools=[],
@@ -183,6 +201,7 @@ async def test_default_lazy_tool_acquisition_uses_async_provider() -> None:
 
     assert result == "/mnt/user-data/workspace/file.txt"
     assert provider.thread_ids == ["thread-lazy"]
+    assert provider.user_ids == ["owner-lazy"]
     assert runtime.state["sandbox"] == {"sandbox_id": "async-sandbox"}
     assert runtime.context["sandbox_id"] == "async-sandbox"
 
@@ -236,6 +255,62 @@ async def test_aafter_agent_delegates_to_super_when_no_sandbox(monkeypatch: pyte
 
     assert result == {"delegated": True}
     assert calls == [(state, runtime)]
+
+
+def test_after_agent_unwraps_overwrite_sandbox_state() -> None:
+    """Fork-restored state may carry the sandbox channel Overwrite-wrapped."""
+    provider = _AsyncOnlyProvider()
+    set_sandbox_provider(provider)
+    try:
+        state = {"sandbox": Overwrite({"sandbox_id": "fork-restored"})}
+        result = SandboxMiddleware().after_agent(state, Runtime(context={}))
+    finally:
+        reset_sandbox_provider()
+
+    assert result is None
+    # The wrapped value replays the parent's sandbox; this run must not release it.
+    assert provider.released_ids == []
+
+
+def test_after_agent_releases_own_sandbox_state() -> None:
+    provider = _AsyncOnlyProvider()
+    set_sandbox_provider(provider)
+    try:
+        state = {"sandbox": {"sandbox_id": "own-sandbox"}}
+        result = SandboxMiddleware().after_agent(state, Runtime(context={}))
+    finally:
+        reset_sandbox_provider()
+
+    assert result is None
+    assert provider.released_ids == ["own-sandbox"]
+
+
+@pytest.mark.anyio
+async def test_aafter_agent_unwraps_overwrite_sandbox_state() -> None:
+    provider = _AsyncOnlyProvider()
+    set_sandbox_provider(provider)
+    try:
+        state = {"sandbox": Overwrite({"sandbox_id": "fork-restored"})}
+        result = await SandboxMiddleware().aafter_agent(state, Runtime(context={}))
+    finally:
+        reset_sandbox_provider()
+
+    assert result is None
+    assert provider.released_ids == []
+
+
+@pytest.mark.anyio
+async def test_aafter_agent_releases_own_sandbox_state() -> None:
+    provider = _AsyncOnlyProvider()
+    set_sandbox_provider(provider)
+    try:
+        state = {"sandbox": {"sandbox_id": "own-sandbox"}}
+        result = await SandboxMiddleware().aafter_agent(state, Runtime(context={}))
+    finally:
+        reset_sandbox_provider()
+
+    assert result is None
+    assert provider.released_ids == ["own-sandbox"]
 
 
 # ---------------------------------------------------------------------------
@@ -322,7 +397,7 @@ def test_wrap_tool_call_merges_with_existing_command_update() -> None:
         return Command(
             update={
                 "messages": [tool_msg],
-                "viewed_images": {"a.png": {"base64": "x", "mime_type": "image/png"}},
+                "viewed_images": {"a.png": {"mime_type": "image/png", "size": 1, "actual_path": "/tmp/a.png"}},
             },
             goto="next-node",
         )
@@ -333,7 +408,7 @@ def test_wrap_tool_call_merges_with_existing_command_update() -> None:
     assert result.goto == "next-node"
     assert isinstance(result.update, dict)
     assert result.update["messages"] == [tool_msg]
-    assert result.update["viewed_images"] == {"a.png": {"base64": "x", "mime_type": "image/png"}}
+    assert result.update["viewed_images"] == {"a.png": {"mime_type": "image/png", "size": 1, "actual_path": "/tmp/a.png"}}
     assert result.update["sandbox"] == {"sandbox_id": "new-sandbox"}
 
 

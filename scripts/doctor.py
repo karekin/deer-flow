@@ -24,6 +24,8 @@ from typing import Literal
 # ---------------------------------------------------------------------------
 
 Status = Literal["ok", "warn", "fail", "skip"]
+PNPM_SCRIPT_PATH = Path(__file__).with_name("pnpm.py")
+FRONTEND_DIR = PNPM_SCRIPT_PATH.parent.parent / "frontend"
 
 
 def _supports_color() -> bool:
@@ -165,18 +167,41 @@ def check_node() -> CheckResult:
 
 
 def check_pnpm() -> CheckResult:
-    candidates = [["pnpm"], ["pnpm.cmd"]]
-    if shutil.which("corepack"):
-        candidates.append(["corepack", "pnpm"])
-    for cmd in candidates:
-        if shutil.which(cmd[0]):
-            out = _run([*cmd, "-v"]) or ""
-            return CheckResult("pnpm", "ok", out)
-    return CheckResult(
-        "pnpm",
-        "fail",
-        fix="npm install -g pnpm   (or: corepack enable)",
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, str(PNPM_SCRIPT_PATH), "-v"],
+            cwd=FRONTEND_DIR,
+            capture_output=True,
+            text=True,
+            check=False,
+            shell=False,
+        )
+    except OSError as exc:
+        return CheckResult(
+            "pnpm",
+            "fail",
+            f"Unable to run pnpm resolver: {exc}",
+            fix="Install pnpm, or install Corepack and ensure it is on PATH",
+        )
+
+    stdout = (result.stdout or "").strip()
+    stderr = (result.stderr or "").strip()
+    if result.returncode != 0:
+        detail = "\n".join(part for part in (stderr, stdout) if part)
+        return CheckResult(
+            "pnpm",
+            "fail",
+            detail or f"pnpm resolver exited with status {result.returncode}",
+            fix="Install pnpm, or install Corepack and ensure it is on PATH",
+        )
+    if not stdout:
+        return CheckResult(
+            "pnpm",
+            "fail",
+            stderr or "pnpm resolver returned no version",
+            fix="Install pnpm, or install Corepack and ensure it is on PATH",
+        )
+    return CheckResult("pnpm", "ok", stdout)
 
 
 def check_uv() -> CheckResult:
@@ -459,7 +484,7 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
 
         free_providers = {
             "web_search": {"ddg_search": "DuckDuckGo (no key needed)"},
-            "web_fetch": {"jina_ai": "Jina AI Reader (no key needed)"},
+            "web_fetch": {"jina_ai": "Jina AI Reader (no key needed)", "crawl4ai": "Crawl4AI (self-hosted, no key needed)"},
             "image_search": {"deerflow.community.image_search.tools": "DuckDuckGo Images (no key needed)"},
         }
         key_providers = {
@@ -468,6 +493,7 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "infoquest": "INFOQUEST_API_KEY",
                 "exa": "EXA_API_KEY",
                 "firecrawl": "FIRECRAWL_API_KEY",
+                "fastcrw": "CRW_API_KEY",
                 "brave": "BRAVE_SEARCH_API_KEY",
                 "serper": "SERPER_API_KEY",
             },
@@ -475,17 +501,27 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "infoquest": "INFOQUEST_API_KEY",
                 "exa": "EXA_API_KEY",
                 "firecrawl": "FIRECRAWL_API_KEY",
+                "fastcrw": "CRW_API_KEY",
             },
             "image_search": {
+                "brave": "BRAVE_SEARCH_API_KEY",
                 "infoquest": "INFOQUEST_API_KEY",
                 "serper": "SERPER_API_KEY",
             },
+            "web_capture": {
+                "browserless": "BROWSERLESS_TOKEN",
+            },
+        }
+        key_fields = {
+            "web_capture": {
+                "browserless": "token",
+            },
         }
 
-        def _configured_key_detail(tool: dict, default_var: str) -> tuple[Status, str] | None:
-            api_key = tool.get("api_key")
-            if isinstance(api_key, str) and api_key.strip():
-                key = api_key.strip()
+        def _configured_key_detail(tool: dict, default_var: str, key_field: str = "api_key") -> tuple[Status, str] | None:
+            configured_key = tool.get(key_field)
+            if isinstance(configured_key, str) and configured_key.strip():
+                key = configured_key.strip()
                 if key.startswith("$"):
                     env_name = key[1:]
                     val = os.environ.get(env_name)
@@ -494,10 +530,14 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                     # The referenced var is unset; fall through to the default
                     # env var below, which tools use as a runtime fallback.
                 else:
-                    return ("warn", "literal api_key set in config")
+                    return ("warn", f"literal {key_field} set in config")
 
             val = os.environ.get(default_var)
             return ("ok", f"{default_var} set") if val and val.strip() else None
+
+        def _browserless_self_hosted(tool: dict) -> bool:
+            base_url = str(tool.get("base_url") or "http://localhost:3032").lower()
+            return "browserless.io" not in base_url
 
         for tool in tool_entries:
             use = tool.get("use", "")
@@ -509,7 +549,8 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
             use = tool.get("use", "")
             for provider, var in key_providers.get(tool_name, {}).items():
                 if provider in use:
-                    key_status = _configured_key_detail(tool, var)
+                    key_field = key_fields.get(tool_name, {}).get(provider, "api_key")
+                    key_status = _configured_key_detail(tool, var, key_field=key_field)
                     if key_status:
                         status, detail = key_status
                         if status == "warn":
@@ -517,9 +558,11 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                                 label,
                                 "warn",
                                 f"{provider} ({detail})",
-                                fix=f"Move the API key to .env as {var}=<your-key> and reference it as ${var}",
+                                fix=f"Move the {key_field} to .env as {var}=<your-key> and reference it as ${var}",
                             )
                         return CheckResult(label, "ok", f"{provider} ({detail})")
+                    if tool_name == "web_capture" and provider == "browserless" and _browserless_self_hosted(tool):
+                        return CheckResult(label, "ok", "browserless (self-hosted, token optional)")
                     return CheckResult(
                         label,
                         "warn",
@@ -556,6 +599,10 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
 
 def check_web_fetch(config_path: Path) -> CheckResult:
     return check_web_tool(config_path, tool_name="web_fetch", label="web fetch configured")
+
+
+def check_web_capture(config_path: Path) -> CheckResult:
+    return check_web_tool(config_path, tool_name="web_capture", label="web capture configured")
 
 
 def check_image_search(config_path: Path) -> CheckResult:
@@ -710,7 +757,12 @@ def main() -> int:
     sections.append(("LLM Provider", llm_checks))
 
     # ── Web Capabilities ─────────────────────────────────────────────────────
-    search_checks = [check_web_search(config_path), check_web_fetch(config_path), check_image_search(config_path)]
+    search_checks = [
+        check_web_search(config_path),
+        check_web_fetch(config_path),
+        check_web_capture(config_path),
+        check_image_search(config_path),
+    ]
     sections.append(("Web Capabilities", search_checks))
 
     # ── Sandbox ──────────────────────────────────────────────────────────────

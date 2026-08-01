@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from langgraph.config import get_config
 
-from deerflow.agents.memory.message_processing import detect_correction, detect_reinforcement, filter_messages_for_memory
-from deerflow.agents.memory.queue import get_memory_queue
+from deerflow.agents.memory import get_memory_manager
 from deerflow.agents.memory.write_policy import should_write_memory
 from deerflow.agents.middlewares.summarization_middleware import SummarizationEvent
 from deerflow.config.memory_config import get_memory_config
@@ -13,7 +12,13 @@ from deerflow.runtime.user_context import resolve_runtime_user_id
 
 
 def memory_flush_hook(event: SummarizationEvent) -> None:
-    """Flush messages about to be summarized into the memory queue."""
+    """Flush messages about to be summarized into the memory queue.
+
+    Thin, backend-agnostic entry: only the ``enabled`` + ``thread_id`` gate
+    and ``user_id`` resolution live here. The backend (via
+    ``manager.add_nowait``) does the filtering, human/AI validation, and
+    correction/reinforcement detection.
+    """
     if not get_memory_config().enabled or not event.thread_id:
         return
 
@@ -24,21 +29,10 @@ def memory_flush_hook(event: SummarizationEvent) -> None:
     if not should_write_memory(run_config):
         return
 
-    filtered_messages = filter_messages_for_memory(list(event.messages_to_summarize))
-    user_messages = [message for message in filtered_messages if getattr(message, "type", None) == "human"]
-    assistant_messages = [message for message in filtered_messages if getattr(message, "type", None) == "ai"]
-    if not user_messages or not assistant_messages:
-        return
-
-    correction_detected = detect_correction(filtered_messages)
-    reinforcement_detected = not correction_detected and detect_reinforcement(filtered_messages)
     user_id = resolve_runtime_user_id(event.runtime)
-    queue = get_memory_queue()
-    queue.add_nowait(
-        thread_id=event.thread_id,
-        messages=filtered_messages,
+    get_memory_manager().add_nowait(
+        event.thread_id,
+        list(event.messages_to_summarize),
         agent_name=event.agent_name,
         user_id=user_id,
-        correction_detected=correction_detected,
-        reinforcement_detected=reinforcement_detected,
     )

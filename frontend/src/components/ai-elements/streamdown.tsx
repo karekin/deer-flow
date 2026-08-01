@@ -1,10 +1,10 @@
 "use client";
 
-import { Component, useMemo, type ComponentProps, type ReactNode } from "react";
+import { Component, type ComponentProps, type ReactNode } from "react";
 import { Streamdown } from "streamdown";
 
+import { stripLeakedSystemTags } from "@/core/streamdown/preprocess";
 import { installClipboardFallback } from "@/core/clipboard";
-import { capMarkdownNesting } from "@/core/streamdown/preprocess";
 
 export type ClipboardSafeStreamdownProps = ComponentProps<typeof Streamdown>;
 
@@ -58,19 +58,15 @@ export function ClipboardSafeStreamdown({
   children,
   ...props
 }: ClipboardSafeStreamdownProps) {
-  // Fast path for the dominant pathological inputs (deep ">" chains and deeply
-  // nested lists both blow up marked's recursive tokenizers) so the error
-  // boundary below rarely has to absorb a stack overflow — and never has to
-  // face the heap exhaustion the same lists cause on larger stacks, which it
-  // cannot catch.
-  const safeChildren = useMemo(
-    () =>
-      typeof children === "string" ? capMarkdownNesting(children) : children,
-    [children],
-  );
+  // Strip leaked system-internal tags (<memory>, <system-reminder>, etc.)
+  // that would cause React to log "unrecognized tag" console errors when
+  // the markdown renderer passes them through as raw HTML.
+  const sanitizedChildren =
+    typeof children === "string" ? stripLeakedSystemTags(children) : children;
+
   return (
-    <StreamdownFallbackBoundary raw={children}>
-      <Streamdown {...props}>{safeChildren}</Streamdown>
+    <StreamdownFallbackBoundary raw={sanitizedChildren}>
+      <Streamdown {...props}>{sanitizedChildren}</Streamdown>
     </StreamdownFallbackBoundary>
   );
 }

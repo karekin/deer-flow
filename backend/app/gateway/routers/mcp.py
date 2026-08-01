@@ -1,14 +1,25 @@
+import asyncio
 import json
 import logging
 import os
+import re
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.gateway.deps import require_admin_user
-from deerflow.config.extensions_config import ExtensionsConfig, get_extensions_config, reload_extensions_config
+from deerflow.config.extensions_config import (
+    ExtensionsConfig,
+    McpRoutingConfig,
+    McpToolOverride,
+    atomic_write_extensions_config,
+    extensions_config_write_lock,
+    get_extensions_config,
+    normalize_mcp_transport_alias,
+    reload_extensions_config,
+)
 from deerflow.mcp.cache import reset_mcp_tools_cache
 
 logger = logging.getLogger(__name__)
@@ -53,6 +64,16 @@ class McpServerConfigResponse(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers to send (for sse or http type)")
     oauth: McpOAuthConfigResponse | None = Field(default=None, description="OAuth configuration for MCP HTTP/SSE servers")
     description: str = Field(default="", description="Human-readable description of what this MCP server provides")
+    routing: McpRoutingConfig = Field(default_factory=McpRoutingConfig, description="Soft routing hints for tools from this MCP server")
+    tools: dict[str, McpToolOverride] = Field(default_factory=dict, description="Per-original-tool MCP configuration overrides")
+    tool_call_timeout: float | None = Field(default=None, description="Timeout in seconds for individual stdio MCP tool calls")
+    model_config = ConfigDict(extra="allow")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_transport_alias(cls, data: Any) -> Any:
+        """Keep API parsing aligned with the runtime MCP config model."""
+        return normalize_mcp_transport_alias(data)
 
 
 class McpConfigResponse(BaseModel):
@@ -73,6 +94,17 @@ class McpConfigUpdateRequest(BaseModel):
     )
 
 
+class McpServerStateUpdateRequest(BaseModel):
+    """Request model for enabling or disabling one MCP server."""
+
+    server_name: str = Field(
+        ...,
+        min_length=1,
+        description="Name of the MCP server to update",
+    )
+    enabled: bool = Field(..., description="Whether the MCP server is enabled")
+
+
 class McpCacheResetResponse(BaseModel):
     """Response model for resetting the MCP tools cache."""
 
@@ -81,6 +113,55 @@ class McpCacheResetResponse(BaseModel):
 
 
 _MASKED_VALUE = "***"
+_SENSITIVE_EXTRA_KEY_RE = re.compile(
+    r"(^|_)(api_key|apikey|access_key|private_key|client_secret|secret|token|password|passwd|credential|credentials|authorization|bearer)(_|$)",
+    re.IGNORECASE,
+)
+
+
+def _normalize_config_key(key: str) -> str:
+    with_boundaries = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", key)
+    with_boundaries = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", with_boundaries)
+    return re.sub(r"[^a-z0-9]+", "_", with_boundaries.lower()).strip("_")
+
+
+def _is_sensitive_extra_key(key: str) -> bool:
+    return bool(_SENSITIVE_EXTRA_KEY_RE.search(_normalize_config_key(key)))
+
+
+def _mask_sensitive_extra_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _MASKED_VALUE if _is_sensitive_extra_key(str(key)) else _mask_sensitive_extra_value(nested) for key, nested in value.items()}
+    if isinstance(value, list):
+        return [_mask_sensitive_extra_value(item) for item in value]
+    return value
+
+
+def _merge_extra_value_preserving_masked(key: str, incoming_value: Any, existing_value: Any, *, existing_present: bool) -> Any:
+    if incoming_value == _MASKED_VALUE and _is_sensitive_extra_key(key):
+        if existing_present:
+            return existing_value
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot set extra config key '{key}' to masked value '***'; provide a real value.",
+        )
+
+    if isinstance(incoming_value, dict) and isinstance(existing_value, dict):
+        merged: dict[str, Any] = {}
+        for nested_key, nested_value in incoming_value.items():
+            nested_present = nested_key in existing_value
+            merged[nested_key] = _merge_extra_value_preserving_masked(
+                str(nested_key),
+                nested_value,
+                existing_value.get(nested_key),
+                existing_present=nested_present,
+            )
+        return merged
+
+    if isinstance(incoming_value, list) and isinstance(existing_value, list) and len(incoming_value) == len(existing_value):
+        return [_merge_extra_value_preserving_masked(key, nested_value, existing_value[index], existing_present=True) for index, nested_value in enumerate(incoming_value)]
+
+    return incoming_value
 
 
 def _allowed_stdio_commands() -> set[str]:
@@ -150,11 +231,13 @@ def _mask_server_config(server: McpServerConfigResponse) -> McpServerConfigRespo
                 "refresh_token": None,
             }
         )
+    masked_extra = {key: _MASKED_VALUE if _is_sensitive_extra_key(key) else _mask_sensitive_extra_value(value) for key, value in (server.model_extra or {}).items()}
     return server.model_copy(
         update={
             "env": masked_env,
             "headers": masked_headers,
             "oauth": masked_oauth,
+            **masked_extra,
         }
     )
 
@@ -215,13 +298,28 @@ def _merge_preserving_secrets(
                 "refresh_token": merged_refresh_token,
             }
         )
-    return incoming.model_copy(
-        update={
-            "env": merged_env,
-            "headers": merged_headers,
-            "oauth": merged_oauth,
-        }
-    )
+    update = {
+        "env": merged_env,
+        "headers": merged_headers,
+        "oauth": merged_oauth,
+    }
+    if "routing" not in incoming.model_fields_set:
+        update["routing"] = existing.routing
+    if "tools" not in incoming.model_fields_set:
+        update["tools"] = existing.tools
+    incoming_extra = incoming.model_extra or {}
+    existing_extra = existing.model_extra or {}
+    for key, value in incoming_extra.items():
+        update[key] = _merge_extra_value_preserving_masked(
+            key,
+            value,
+            existing_extra.get(key),
+            existing_present=key in existing_extra,
+        )
+    for key, value in (existing.model_extra or {}).items():
+        if key not in (incoming.model_extra or {}):
+            update[key] = value
+    return incoming.model_copy(update=update)
 
 
 @router.get(
@@ -257,6 +355,106 @@ async def get_mcp_configuration(request: Request) -> McpConfigResponse:
 
     servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in config.mcp_servers.items()}
     return McpConfigResponse(mcp_servers=servers)
+
+
+def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:
+    """Worker-thread body for :func:`update_mcp_configuration`.
+
+    Resolving the config path, the existence probe, reading the raw JSON,
+    writing the merged config, and reloading it are all blocking filesystem IO
+    that must stay off the event loop. The merge is pure in-memory work but
+    lives here too so the whole read-modify-write is a single worker hop.
+    Returns the reloaded MCP server configs for the response.
+    """
+    with extensions_config_write_lock:
+        # Get the current config path (or determine where to save it)
+        config_path = ExtensionsConfig.resolve_config_path()
+
+        # If no config file exists, create one in the parent directory (project root)
+        if config_path is None:
+            config_path = Path.cwd().parent / "extensions_config.json"
+            logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
+
+        # Load current config to preserve skills
+        current_config = get_extensions_config()
+
+        # Load raw (un-resolved) JSON from disk to use as the merge source.
+        # This preserves $VAR placeholders in env values and top-level keys
+        # like mcpInterceptors that would otherwise be lost.
+        raw_servers: dict[str, dict] = {}
+        raw_other_keys: dict = {}
+        if config_path is not None and config_path.exists():
+            with open(config_path, encoding="utf-8") as f:
+                raw_data = json.load(f)
+            raw_servers = raw_data.get("mcpServers", {})
+            # Preserve any top-level keys beyond mcpServers/skills
+            for key, value in raw_data.items():
+                if key not in ("mcpServers", "skills"):
+                    raw_other_keys[key] = value
+
+        # Merge incoming server configs with raw on-disk secrets
+        merged_servers: dict[str, McpServerConfigResponse] = {}
+        for name, incoming in body.mcp_servers.items():
+            raw_server = raw_servers.get(name)
+            if raw_server is not None:
+                merged_servers[name] = _merge_preserving_secrets(
+                    incoming,
+                    McpServerConfigResponse(**raw_server),
+                )
+            else:
+                merged_servers[name] = incoming
+
+        # Build config data preserving all top-level keys from the original file
+        config_data = dict(raw_other_keys)
+        config_data["mcpServers"] = {name: server.model_dump() for name, server in merged_servers.items()}
+        config_data["skills"] = {name: {"enabled": skill.enabled} for name, skill in current_config.skills.items()}
+
+        atomic_write_extensions_config(config_path, config_data)
+
+        logger.info(f"MCP configuration updated and saved to: {config_path}")
+
+        # Reload the Gateway configuration and update the global cache. The
+        # agent runtime lives in Gateway, so this keeps API reads and tool
+        # execution aligned after extensions_config.json changes.
+        reloaded_config = reload_extensions_config()
+        return reloaded_config.mcp_servers
+
+
+def _apply_mcp_server_state_update(body: McpServerStateUpdateRequest) -> dict:
+    """Update one server state while preserving the raw extensions config."""
+    with extensions_config_write_lock:
+        config_path = ExtensionsConfig.resolve_config_path()
+        if config_path is None or not config_path.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"MCP server '{body.server_name}' not found",
+            )
+
+        with open(config_path, encoding="utf-8") as f:
+            raw_data = json.load(f)
+
+        raw_servers = raw_data.get("mcpServers", {})
+        raw_server = raw_servers.get(body.server_name) if isinstance(raw_servers, dict) else None
+        if not isinstance(raw_server, dict):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"MCP server '{body.server_name}' not found",
+            )
+
+        if body.enabled:
+            target_server = McpServerConfigResponse(**raw_server)
+            _validate_mcp_update_request(
+                McpConfigUpdateRequest(
+                    mcp_servers={body.server_name: target_server},
+                )
+            )
+
+        raw_server["enabled"] = body.enabled
+        atomic_write_extensions_config(config_path, raw_data)
+
+        logger.info("MCP server %s enabled state updated to %s", body.server_name, body.enabled)
+        reloaded_config = reload_extensions_config()
+        return reloaded_config.mcp_servers
 
 
 @router.post(
@@ -322,60 +520,15 @@ async def update_mcp_configuration(request: Request, body: McpConfigUpdateReques
         await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
         _validate_mcp_update_request(body)
 
-        # Get the current config path (or determine where to save it)
-        config_path = ExtensionsConfig.resolve_config_path()
+        # Offload the blocking read-modify-write of extensions_config.json
+        # (path resolve, existence probe, raw read, merged write, reload). The
+        # worker takes extensions_config_write_lock for the whole RMW, so it stays
+        # atomic and serialized against the skills router (the other writer of
+        # this file) even if this request is cancelled mid-write.
+        reloaded_servers = await asyncio.to_thread(_apply_mcp_config_update, body)
 
-        # If no config file exists, create one in the parent directory (project root)
-        if config_path is None:
-            config_path = Path.cwd().parent / "extensions_config.json"
-            logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
-
-        # Load current config to preserve skills
-        current_config = get_extensions_config()
-
-        # Load raw (un-resolved) JSON from disk to use as the merge source.
-        # This preserves $VAR placeholders in env values and top-level keys
-        # like mcpInterceptors that would otherwise be lost.
-        raw_servers: dict[str, dict] = {}
-        raw_other_keys: dict = {}
-        if config_path is not None and config_path.exists():
-            with open(config_path, encoding="utf-8") as f:
-                raw_data = json.load(f)
-            raw_servers = raw_data.get("mcpServers", {})
-            # Preserve any top-level keys beyond mcpServers/skills
-            for key, value in raw_data.items():
-                if key not in ("mcpServers", "skills"):
-                    raw_other_keys[key] = value
-
-        # Merge incoming server configs with raw on-disk secrets
-        merged_servers: dict[str, McpServerConfigResponse] = {}
-        for name, incoming in body.mcp_servers.items():
-            raw_server = raw_servers.get(name)
-            if raw_server is not None:
-                merged_servers[name] = _merge_preserving_secrets(
-                    incoming,
-                    McpServerConfigResponse(**raw_server),
-                )
-            else:
-                merged_servers[name] = incoming
-
-        # Build config data preserving all top-level keys from the original file
-        config_data = dict(raw_other_keys)
-        config_data["mcpServers"] = {name: server.model_dump() for name, server in merged_servers.items()}
-        config_data["skills"] = {name: {"enabled": skill.enabled} for name, skill in current_config.skills.items()}
-
-        # Write the configuration to file
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config_data, f, indent=2)
-
-        logger.info(f"MCP configuration updated and saved to: {config_path}")
-
-        # Reload the Gateway configuration and update the global cache. The
-        # agent runtime lives in Gateway, so this keeps API reads and tool
-        # execution aligned after extensions_config.json changes.
-        reloaded_config = reload_extensions_config()
+        servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_servers.items()}
         reset_mcp_tools_cache()
-        servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_config.mcp_servers.items()}
         return McpConfigResponse(mcp_servers=servers)
 
     except HTTPException:
@@ -383,3 +536,25 @@ async def update_mcp_configuration(request: Request, body: McpConfigUpdateReques
     except Exception as e:
         logger.error(f"Failed to update MCP configuration: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to update MCP configuration: {str(e)}")
+
+
+@router.patch(
+    "/mcp/config",
+    response_model=McpConfigResponse,
+    summary="Update MCP Server State",
+    description="Enable or disable one MCP server without replacing the full extensions configuration.",
+)
+async def update_mcp_server_state(request: Request, body: McpServerStateUpdateRequest) -> McpConfigResponse:
+    """Enable or disable one MCP server and reload the MCP tool cache."""
+    try:
+        await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+        reloaded_servers = await asyncio.to_thread(_apply_mcp_server_state_update, body)
+
+        servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_servers.items()}
+        reset_mcp_tools_cache()
+        return McpConfigResponse(mcp_servers=servers)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to update MCP server %s state: %s", body.server_name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to update MCP server state: {str(e)}")

@@ -20,6 +20,12 @@ __pycache__/
 .venv
 venv/
 
+# Benchmark outputs
+bench_results.jsonl
+bench_optimized.jsonl
+results.jsonl
+backend/scripts/benchmark/*.jsonl
+
 # Environment variables
 .env
 
@@ -61,3 +67,6 @@ config.yaml.bak
 .gstack/
 .worktrees
 .omx/
+
+# Monocle agent-observability trace output (local file exporter)
+.monocle/
