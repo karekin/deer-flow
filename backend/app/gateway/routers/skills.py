@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from app.gateway.deps import get_config, require_admin_user
@@ -21,6 +21,7 @@ from deerflow.config.extensions_config import (
 )
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills import Skill
+from deerflow.skills.business_catalog import BusinessCatalogError, build_business_skill_catalog, read_business_skill_content
 from deerflow.skills.installer import SkillAlreadyExistsError, SkillSecurityScanError
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.security_static_scanner import (
@@ -54,6 +55,66 @@ class SkillsListResponse(BaseModel):
     """Response model for listing all skills."""
 
     skills: list[SkillResponse]
+
+
+class BusinessSkillSummary(BaseModel):
+    name: str
+    description: str
+    category: SkillCategory
+    enabled: bool
+    content_sha256: str
+
+
+class BusinessRoleSkillGroup(BaseModel):
+    code: str
+    name: str
+    order: int
+    skill_count: int
+    skills: list[BusinessSkillSummary]
+
+
+class BusinessDomainSkillGroup(BaseModel):
+    code: str
+    name: str
+    order: int
+    skill_count: int
+    roles: list[BusinessRoleSkillGroup]
+
+
+class BusinessUnitSkillGroup(BaseModel):
+    code: str
+    name: str
+    status: str
+    order: int
+    skill_count: int
+    domains: list[BusinessDomainSkillGroup]
+
+
+class BusinessSkillCatalogResponse(BaseModel):
+    schema_version: str
+    taxonomy_sha256: str
+    catalog_sha256: str
+    skill_count: int
+    assigned_skill_count: int
+    missing_skill_names: list[str]
+    business_units: list[BusinessUnitSkillGroup]
+
+
+class BusinessSkillClassification(BaseModel):
+    business_unit_code: str
+    business_unit_name: str
+    domain_code: str
+    domain_name: str
+    role_code: str
+    role_name: str
+
+
+class BusinessSkillContentResponse(BusinessSkillSummary):
+    taxonomy_sha256: str
+    classifications: list[BusinessSkillClassification]
+    metadata: dict
+    body: str
+    content: str
 
 
 class SkillUpdateRequest(BaseModel):
@@ -160,6 +221,46 @@ async def list_skills(config: AppConfig = Depends(get_config)) -> SkillsListResp
     except Exception as e:
         logger.error(f"Failed to load skills: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to load skills: {str(e)}")
+
+
+@router.get(
+    "/skills/business-catalog",
+    response_model=BusinessSkillCatalogResponse,
+    summary="List Business Skill Catalog",
+    description="Read the effective public Skill catalog grouped by business unit, business domain, and role.",
+)
+async def list_business_skill_catalog(response: Response, config: AppConfig = Depends(get_config)) -> BusinessSkillCatalogResponse:
+    try:
+        payload = await asyncio.to_thread(lambda: build_business_skill_catalog(_get_user_skill_storage(config)))
+    except BusinessCatalogError as exc:
+        logger.warning("Business skill catalog is unavailable: %s", exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to build business skill catalog")
+        raise HTTPException(status_code=500, detail="Failed to build business skill catalog") from exc
+    response.headers["ETag"] = f'"{payload["catalog_sha256"]}"'
+    response.headers["Cache-Control"] = "private, max-age=0, must-revalidate"
+    return BusinessSkillCatalogResponse.model_validate(payload)
+
+
+@router.get(
+    "/skills/business-catalog/{skill_name}",
+    response_model=BusinessSkillContentResponse,
+    summary="Get Business Skill Content",
+    description="Read one effective public or integration SKILL.md together with its business classification and content digest.",
+)
+async def get_business_skill_content(skill_name: str, response: Response, config: AppConfig = Depends(get_config)) -> BusinessSkillContentResponse:
+    try:
+        payload = await asyncio.to_thread(lambda: read_business_skill_content(_get_user_skill_storage(config), skill_name))
+    except BusinessCatalogError as exc:
+        status_code = 404 if "not found" in str(exc).lower() else 400
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to read business skill content for %s", skill_name)
+        raise HTTPException(status_code=500, detail="Failed to read business skill content") from exc
+    response.headers["ETag"] = f'"{payload["content_sha256"]}"'
+    response.headers["Cache-Control"] = "private, max-age=0, must-revalidate"
+    return BusinessSkillContentResponse.model_validate(payload)
 
 
 @router.post(
