@@ -738,24 +738,48 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
 
             raw_tools.append(workflow_manage)
         workflow_registry_tool_names = {
+            "workflow_evidence_digest",
+            "workflow_evidence_ingest",
+            "workflow_evidence_timeline",
             "workflow_definition_get",
+            "workflow_feedback_report",
+            "workflow_governance_list",
+            "workflow_governance_status",
             "workflow_observation_get",
+            "workflow_problem_report",
             "workflow_proposal_status",
             "workflow_proposal_submit",
+            "workflow_validation_start",
         }
         if allowed_tool_names & workflow_registry_tool_names:
             from deerflow.tools.cloudmold_workflow_tools import (
                 workflow_definition_get,
+                workflow_evidence_digest,
+                workflow_evidence_ingest,
+                workflow_evidence_timeline,
+                workflow_feedback_report,
+                workflow_governance_list,
+                workflow_governance_status,
                 workflow_observation_get,
+                workflow_problem_report,
                 workflow_proposal_status,
                 workflow_proposal_submit,
+                workflow_validation_start,
             )
 
             workflow_registry_tools = (
+                workflow_evidence_digest,
+                workflow_evidence_ingest,
+                workflow_evidence_timeline,
                 workflow_definition_get,
+                workflow_feedback_report,
+                workflow_governance_list,
+                workflow_governance_status,
                 workflow_observation_get,
+                workflow_problem_report,
                 workflow_proposal_status,
                 workflow_proposal_submit,
+                workflow_validation_start,
             )
             raw_tools.extend(tool for tool in workflow_registry_tools if tool.name in allowed_tool_names)
     configured_tools = raw_tools + extra_tools

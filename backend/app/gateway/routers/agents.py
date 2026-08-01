@@ -2,14 +2,15 @@
 
 import asyncio
 import logging
-import re
 import os
+import re
 from datetime import UTC, datetime
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.gateway.deps import get_scheduled_task_repo
 from deerflow.config.agents_api_config import get_agents_api_config
 from deerflow.config.agents_config import (
     AgentConfig,
@@ -21,11 +22,10 @@ from deerflow.config.agents_config import (
 )
 from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
-from deerflow.scheduler.schedules import next_run_at as compute_next_run_at
-from deerflow.scheduler.schedules import normalize_cron_expression, validate_timezone
 from deerflow.persistence.agents import AgentExistsError, get_agent_store
 from deerflow.runtime.user_context import get_effective_user_id
-from app.gateway.deps import get_scheduled_task_repo
+from deerflow.scheduler.schedules import next_run_at as compute_next_run_at
+from deerflow.scheduler.schedules import normalize_cron_expression, validate_timezone
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agents"])
@@ -46,7 +46,15 @@ _WORKFLOW_STEWARD_REQUIRED_TOOLS = [
 ]
 _WORKFLOW_STEWARD_OPTIONAL_TOOLS = [
     "workflow_definition_get",
+    "workflow_governance_list",
+    "workflow_governance_status",
+    "workflow_validation_start",
     "workflow_observation_get",
+    "workflow_evidence_timeline",
+    "workflow_evidence_digest",
+    "workflow_evidence_ingest",
+    "workflow_problem_report",
+    "workflow_feedback_report",
     "workflow_proposal_status",
     "workflow_proposal_submit",
     "web_search",
@@ -72,6 +80,8 @@ _WORKFLOW_STEWARD_TASK_PROMPT_TEMPLATE = """你是 workflow-steward 的自动巡
 5) 是否需要人工决策；
 6) 是否建议生成候选版本并提交给 proposal registry。
 
+先比较 evidence digest 与既有 problem/candidate 状态。没有新增、恶化或达到阈值的材料变化时，只输出简短“无实质变化”，不要重复建问题或候选；存在实质变化时，主动向用户说明问题、影响、证据、建议和需要的决策。
+
 限制：不执行 release、rollback、approve、business-write，仅生成提案与审阅包并保留 immutable candidate 证据链。
 """
 _WORKFLOW_STEWARD_SOUL = """# Workflow Steward
@@ -83,11 +93,17 @@ Use `workflow_definition_get` for the signed active baseline and
 `workflow_observation_get` for governed CloudMold run/model observations when those
 operator-configured integrations are available. Diagnose from redacted user behavior,
 run telemetry, system logs, business outcomes, feedback, and governed external evidence.
+Use `workflow_governance_list` to discover the tenant-scoped managed workflow set,
+`workflow_governance_status` to read validation/release state, `workflow_validation_start`
+to request independent validation for the current candidate, `workflow_evidence_timeline`
+and `workflow_evidence_digest` for bounded evidence review, and
+`workflow_evidence_ingest` / `workflow_problem_report` / `workflow_feedback_report`
+to append governed evidence tied to a local immutable proposal bundle.
 Create a proposal and field-level JSON Patch, package the review bundle, read CloudMold's
 candidate pointer with `workflow_proposal_status`, and submit the immutable bundle with
 `workflow_proposal_submit` when configured. Submission registers a candidate only; never
 claim it is validated, approved, released, active, or rolled back. The current managed
-template does not include replay, shadow, release, rollback, approval, or business-write tools.
+template does not include replay, shadow, release, rollback, approval, or business-execution tools.
 
 You are an evolution-plane maintainer, not a business execution authority. Never invent
 tenant identity, operator identity, approval scope, signatures, idempotency keys,
@@ -117,7 +133,7 @@ def _parse_comma_separated_ids(raw: str) -> list[str]:
 def _workflow_scope_clause() -> str:
     workflow_ids = _parse_comma_separated_ids(os.environ.get(_WORKFLOW_STEWARD_TARGET_WORKFLOW_IDS_ENV, "").strip())
     if not workflow_ids:
-        return "workflow 目标范围：覆盖当前环境可观测到的全部 workflow。"
+        return "workflow 目标范围：先调用 workflow_governance_list 获取当前租户的真实清单，再逐项巡检；不要猜测标识。"
     return "workflow 目标范围：" + "；".join(workflow_ids)
 
 

@@ -4,7 +4,15 @@ description: Maintains E1 CloudMold workflow drafts from supplied redacted behav
 allowed-tools:
   - describe_skill
   - workflow_definition_get
+  - workflow_governance_list
+  - workflow_governance_status
+  - workflow_validation_start
   - workflow_observation_get
+  - workflow_evidence_timeline
+  - workflow_evidence_digest
+  - workflow_evidence_ingest
+  - workflow_problem_report
+  - workflow_feedback_report
   - workflow_manage
   - workflow_proposal_status
   - workflow_proposal_submit
@@ -40,7 +48,7 @@ Do not diagnose from raw PII, secrets, cross-tenant records, an unknown denomina
 
 ## Evolution Workflow
 
-1. **Observe** — inspect the bounded evidence supplied to the run, use `workflow_observation_get` for configured managed-run/model observations, and, when useful, gather governed web evidence. Do not claim access to CloudMold sources the tool did not return.
+1. **Observe** — begin scheduled runs with `workflow_governance_list` to discover the tenant-scoped managed set, inspect the bounded evidence supplied to the run, use `workflow_observation_get`, `workflow_evidence_timeline`, and `workflow_evidence_digest` for configured CloudMold observations and evidence summaries, and, when useful, gather governed web evidence. Do not claim access to CloudMold sources the tool did not return.
 2. **Frame the problem** — state reproduction conditions, affected business objects, baseline, severity, confidence, evidence completeness, candidate root causes, and expiry.
 3. **Design** — declare one primary objective, business and technical guardrails, minimum sample, observation window, allowed variance, and explicit rollback conditions.
 4. **Import** — use `workflow_definition_get` to retrieve the exact immutable version, then pass its definition and fresh attestation unchanged to `workflow_manage(import_active)`.
@@ -48,7 +56,9 @@ Do not diagnose from raw PII, secrets, cross-tenant records, an unknown denomina
 6. **Preflight** — run `workflow_manage(validate)`. Treat its result as local static preflight only; capability registration, closure, replay, shadow, approvals, release, and rollback remain external verdicts.
 7. **Package** — call `workflow_manage(create_proposal)` with evidence references, hypothesis, expected benefit, guardrails, sample, window, rollback conditions, and a risk no lower than the server-derived minimum.
 8. **Submit candidate** — call `workflow_proposal_status` to obtain the current CAS pointer version, then `workflow_proposal_submit` with the immutable local proposal ID. A successful submission means only that CloudMold registered a candidate; it is not validation, approval, release, or activation.
-9. **Report** — proactively explain the problem, evidence window, impact, temporary mitigation, proposed change, expected benefit, risk, candidate state, missing external validation, and required user decision.
+9. **Append governed evidence** — use `workflow_evidence_ingest`, `workflow_problem_report`, and `workflow_feedback_report` to persist redacted observation, problem, and feedback records against the immutable local proposal lineage. Let the tools derive workflow version, lineage ID, and idempotency; never invent them.
+10. **Request validation** — use `workflow_governance_status` to confirm the current candidate state, then `workflow_validation_start` to ask CloudMold's independent validator to begin replay/shadow/business evaluation. Validation request acceptance is not a pass result.
+11. **Report** — proactively explain the problem, evidence window, impact, temporary mitigation, proposed change, expected benefit, risk, candidate state, missing external validation, and required user decision.
 
 Tool submission is not proof of external validation or release. The current managed template stops at a CloudMold candidate registration and cannot promote its own proposal.
 

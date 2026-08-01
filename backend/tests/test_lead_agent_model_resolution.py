@@ -1247,7 +1247,15 @@ def test_custom_agent_exact_tool_allowlist_filters_configured_and_mcp_tools(monk
             "allowed_external_tool",
             "workflow_manage",
             "workflow_definition_get",
+            "workflow_governance_list",
+            "workflow_governance_status",
+            "workflow_validation_start",
             "workflow_observation_get",
+            "workflow_evidence_timeline",
+            "workflow_evidence_digest",
+            "workflow_evidence_ingest",
+            "workflow_problem_report",
+            "workflow_feedback_report",
             "workflow_proposal_status",
             "workflow_proposal_submit",
         ],
@@ -1284,7 +1292,15 @@ def test_custom_agent_exact_tool_allowlist_filters_configured_and_mcp_tools(monk
     assert "allowed_external_tool" in names
     assert "workflow_manage" in names
     assert "workflow_definition_get" in names
+    assert "workflow_governance_list" in names
+    assert "workflow_governance_status" in names
+    assert "workflow_validation_start" in names
     assert "workflow_observation_get" in names
+    assert "workflow_evidence_timeline" in names
+    assert "workflow_evidence_digest" in names
+    assert "workflow_evidence_ingest" in names
+    assert "workflow_problem_report" in names
+    assert "workflow_feedback_report" in names
     assert "workflow_proposal_status" in names
     assert "workflow_proposal_submit" in names
     assert "forbidden_external_tool" not in names

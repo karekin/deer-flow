@@ -62,6 +62,28 @@ def _proposal(*, risk_level: str = "E1") -> dict:
     }
 
 
+def _managed_bundle(
+    *,
+    workflow_id: str = "skill.cloudmold.inventory.stockout-diagnosis.v1",
+    proposal_id: str = "proposal-aabbccddeeff0011",
+    base_version: str = "1.0.0",
+    candidate_version: str = "1.0.1",
+) -> dict:
+    return {
+        "proposal": {
+            "proposal_id": proposal_id,
+            "workflow_id": workflow_id,
+            "risk_level": "E1",
+        },
+        "base_definition": {"skill_id": workflow_id, "skill_version": base_version},
+        "candidate_definition": {
+            "skill_id": workflow_id,
+            "skill_version": candidate_version,
+        },
+        "validation": {"passed": True},
+    }
+
+
 def _attestation(definition: dict, *, owner_user_id: str = "227") -> dict:
     material = {
         "issuer": "cloudmold-workflow-registry",
@@ -490,19 +512,7 @@ async def test_proposal_registry_status_uses_fixed_workflow_endpoint():
 
 @pytest.mark.asyncio
 async def test_proposal_submit_loads_managed_bundle_and_posts_cas_payload(monkeypatch: pytest.MonkeyPatch):
-    bundle = {
-        "proposal": {
-            "proposal_id": "proposal-aabbccddeeff0011",
-            "workflow_id": "skill.cloudmold.inventory.stockout-diagnosis.v1",
-            "risk_level": "E1",
-        },
-        "base_definition": {"skill_id": "skill.cloudmold.inventory.stockout-diagnosis.v1", "skill_version": "1.0.0"},
-        "candidate_definition": {
-            "skill_id": "skill.cloudmold.inventory.stockout-diagnosis.v1",
-            "skill_version": "1.0.1",
-        },
-        "validation": {"passed": True},
-    }
+    bundle = _managed_bundle()
     monkeypatch.setattr(module, "load_proposal_for_submission", lambda *_: bundle)
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -532,3 +542,344 @@ async def test_proposal_submit_loads_managed_bundle_and_posts_cas_payload(monkey
 
     assert result["pointer_version"] == 4
     assert result["status"] == "SUBMITTED"
+
+
+@pytest.mark.asyncio
+async def test_governance_status_uses_fixed_endpoint():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/admin-api/cloudmold/ai-operations/workflow-registry/governance/workflows/skill.cloudmold.inventory.stockout-diagnosis.v1"
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "workflow_id": "skill.cloudmold.inventory.stockout-diagnosis.v1",
+                    "candidate_version_id": "1.0.1",
+                    "pointer_version": 8,
+                    "current_status": "READY_FOR_REVIEW",
+                    "kill_switch_enabled": False,
+                },
+            },
+        )
+
+    result = await module._get_governance_status(
+        runtime=_runtime(),
+        workflow_id="skill.cloudmold.inventory.stockout-diagnosis.v1",
+        transport=_authenticated_transport(handler),
+    )
+
+    assert result["candidate_version_id"] == "1.0.1"
+    assert result["pointer_version"] == 8
+
+
+@pytest.mark.asyncio
+async def test_governance_list_discovers_tenant_scoped_workflows_from_fixed_endpoint():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/admin-api/cloudmold/ai-operations/workflow-registry/governance/workflows"
+        assert request.url.params["limit"] == "100"
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": [
+                    {
+                        "workflow_id": "skill.cloudmold.inventory.stockout-diagnosis.v1",
+                        "stable_version_id": "wrv-1",
+                        "pointer_version": 8,
+                    }
+                ],
+            },
+        )
+
+    result = await module._list_governance_statuses(
+        runtime=_runtime(),
+        transport=_authenticated_transport(handler),
+    )
+
+    assert [item["workflow_id"] for item in result] == [
+        "skill.cloudmold.inventory.stockout-diagnosis.v1"
+    ]
+
+    with pytest.raises(ValueError, match="between 1 and 200"):
+        await module._list_governance_statuses(runtime=_runtime(), limit=201)
+
+
+@pytest.mark.asyncio
+async def test_validation_start_derives_candidate_and_idempotency_from_governance_status():
+    expected_key = module._derived_idempotency_key(
+        "validation",
+        {
+            "workflow_id": "skill.cloudmold.inventory.stockout-diagnosis.v1",
+            "candidate_version_id": "1.0.1",
+            "expected_pointer_version": 8,
+        },
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            assert request.url.path == "/admin-api/cloudmold/ai-operations/workflow-registry/governance/workflows/skill.cloudmold.inventory.stockout-diagnosis.v1"
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "workflow_id": "skill.cloudmold.inventory.stockout-diagnosis.v1",
+                        "candidate_version_id": "1.0.1",
+                        "pointer_version": 8,
+                        "current_status": "READY_FOR_REVIEW",
+                        "kill_switch_enabled": False,
+                    },
+                },
+            )
+        payload = json.loads(request.content)
+        assert request.url.path == "/admin-api/cloudmold/ai-operations/workflow-registry/governance/validation-requests"
+        assert payload == {
+            "workflow_id": "skill.cloudmold.inventory.stockout-diagnosis.v1",
+            "candidate_version_id": "1.0.1",
+            "expected_pointer_version": 8,
+            "idempotency_key": expected_key,
+        }
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "workflow_id": "skill.cloudmold.inventory.stockout-diagnosis.v1",
+                    "candidate_version_id": "1.0.1",
+                    "pointer_version": 9,
+                    "current_status": "VALIDATING",
+                },
+            },
+        )
+
+    result = await module._start_validation(
+        runtime=_runtime(),
+        workflow_id="skill.cloudmold.inventory.stockout-diagnosis.v1",
+        transport=_authenticated_transport(handler),
+    )
+
+    assert result["idempotency_key"] == expected_key
+    assert result["governance"]["current_status"] == "VALIDATING"
+
+
+@pytest.mark.asyncio
+async def test_workflow_evidence_timeline_uses_fixed_query_and_bounded_page():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/admin-api/cloudmold/ai-operations/workflow-evidence/query"
+        assert request.url.params["workflowId"] == "skill.cloudmold.inventory.stockout-diagnosis.v1"
+        assert request.url.params["pageNo"] == "2"
+        assert request.url.params["pageSize"] == "100"
+        assert request.url.params["windowStart"] == "2026-07-25T00:00:00"
+        assert request.url.params["windowEnd"] == "2026-07-31T00:00:00"
+        return httpx.Response(
+            200,
+            json={"code": 0, "data": {"list": [{"recordType": "PROBLEM"}], "total": 1}},
+        )
+
+    result = await module._query_evidence_timeline(
+        runtime=_runtime(),
+        workflow_id="skill.cloudmold.inventory.stockout-diagnosis.v1",
+        window_start="2026-07-25T00:00:00Z",
+        window_end="2026-07-31T00:00:00Z",
+        page_no=2,
+        page_size=200,
+        transport=_authenticated_transport(handler),
+    )
+
+    assert result["page_size"] == 100
+    assert result["data"]["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_workflow_evidence_digest_uses_daily_and_weekly_fixed_paths():
+    seen_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_paths.append(request.url.path)
+        return httpx.Response(200, json={"code": 0, "data": {"workflowId": "skill.cloudmold.inventory.stockout-diagnosis.v1"}})
+
+    daily = await module._query_evidence_digest(
+        runtime=_runtime(),
+        workflow_id="skill.cloudmold.inventory.stockout-diagnosis.v1",
+        window_start="2026-07-25T00:00:00",
+        window_end="2026-07-31T00:00:00",
+        granularity="daily",
+        transport=_authenticated_transport(handler),
+    )
+    weekly = await module._query_evidence_digest(
+        runtime=_runtime(),
+        workflow_id="skill.cloudmold.inventory.stockout-diagnosis.v1",
+        window_start="2026-07-01T00:00:00",
+        window_end="2026-07-31T00:00:00",
+        granularity="weekly",
+        transport=_authenticated_transport(handler),
+    )
+
+    assert daily["granularity"] == "daily"
+    assert weekly["granularity"] == "weekly"
+    assert seen_paths == [
+        "/admin-api/cloudmold/ai-operations/workflow-evidence/digests/daily",
+        "/admin-api/cloudmold/ai-operations/workflow-evidence/digests/weekly",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_workflow_evidence_ingest_derives_lineage_version_and_idempotency(monkeypatch: pytest.MonkeyPatch):
+    bundle = _managed_bundle()
+    monkeypatch.setattr(module, "load_proposal_for_submission", lambda *_: bundle)
+    expected_lineage = module._derived_lineage_id(
+        "skill.cloudmold.inventory.stockout-diagnosis.v1",
+        "1.0.1",
+        "proposal-aabbccddeeff0011",
+    )
+    expected_key = module._derived_idempotency_key(
+        "evidence",
+        {
+            "workflow_id": "skill.cloudmold.inventory.stockout-diagnosis.v1",
+            "proposal_id": "proposal-aabbccddeeff0011",
+            "workflow_version": "1.0.1",
+            "source_type": "SYSTEM_LOG",
+            "headline": "Repeated timeout spike",
+            "status": "CAPTURED",
+            "observed_at": "2026-07-31T09:30:00",
+            "window_start": "2026-07-25T00:00:00",
+            "window_end": "2026-07-31T00:00:00",
+        },
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert request.url.path == "/admin-api/cloudmold/ai-operations/workflow-evidence/ingest"
+        assert payload["workflowVersion"] == "1.0.1"
+        assert payload["lineageId"] == expected_lineage
+        assert payload["proposalId"] == "proposal-aabbccddeeff0011"
+        assert payload["idempotencyKey"] == expected_key
+        assert payload["externalSnapshots"][0]["sourceClass"] == "REGULATION"
+        assert payload["externalSnapshots"][0]["contentHashSha256"] == hashlib.sha256(
+            b"redacted policy excerpt"
+        ).hexdigest()
+        assert "content_digest_material" not in payload["externalSnapshots"][0]
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "aggregateType": "WORKFLOW_OBSERVATION",
+                    "aggregateId": "wfo-1",
+                    "lineageId": expected_lineage,
+                    "workflowVersion": "1.0.1",
+                    "proposalId": "proposal-aabbccddeeff0011",
+                    "duplicate": False,
+                },
+            },
+        )
+
+    result = await module._ingest_workflow_evidence(
+        runtime=_runtime(),
+        workflow_id="skill.cloudmold.inventory.stockout-diagnosis.v1",
+        proposal_id="proposal-aabbccddeeff0011",
+        source_type="SYSTEM_LOG",
+        headline="Repeated timeout spike",
+        detail_text="The governed run timed out twice in the same decision step.",
+        severity="HIGH",
+        dqc_status="WARN",
+        status="CAPTURED",
+        observed_at="2026-07-31T09:30:00Z",
+        window_start="2026-07-25T00:00:00Z",
+        window_end="2026-07-31T00:00:00Z",
+        summary_source_refs=["cloudmold://managed-run/123"],
+        metrics={"timeout_count": 2},
+        external_snapshots=[
+            {
+                "url": "https://example.com/policy",
+                "fetched_at": "2026-07-31T08:00:00Z",
+                "summary": "Operator policy tightened the retry window.",
+                "content_digest_material": "redacted policy excerpt",
+                "source_class": "REGULATION",
+                "confidence": 0.7,
+                "severity": "MEDIUM",
+                "dqc_status": "PASS",
+                "status": "VERIFIED",
+                "window_start": "2026-07-25T00:00:00Z",
+                "window_end": "2026-07-31T00:00:00Z",
+            }
+        ],
+        transport=_authenticated_transport(handler),
+    )
+
+    assert result["lineage_id"] == expected_lineage
+    assert result["result"]["aggregateType"] == "WORKFLOW_OBSERVATION"
+
+
+@pytest.mark.asyncio
+async def test_workflow_problem_report_derives_context_from_managed_bundle(monkeypatch: pytest.MonkeyPatch):
+    bundle = _managed_bundle()
+    monkeypatch.setattr(module, "load_proposal_for_submission", lambda *_: bundle)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert request.url.path == "/admin-api/cloudmold/ai-operations/workflow-evidence/problem"
+        assert payload["workflowVersion"] == "1.0.1"
+        assert payload["proposalId"] == "proposal-aabbccddeeff0011"
+        assert payload["status"] == "OPEN"
+        return httpx.Response(
+            200,
+            json={"code": 0, "data": {"aggregateType": "WORKFLOW_PROBLEM", "aggregateId": "wfp-1"}},
+        )
+
+    result = await module._record_workflow_problem(
+        runtime=_runtime(),
+        workflow_id="skill.cloudmold.inventory.stockout-diagnosis.v1",
+        proposal_id="proposal-aabbccddeeff0011",
+        source_type="USER_BEHAVIOR",
+        headline="Operators repeatedly override the same branch",
+        problem_detail="Three takeovers happened after the same wait step.",
+        severity="MEDIUM",
+        dqc_status="UNKNOWN",
+        status="OPEN",
+        observed_at="2026-07-31T10:00:00",
+        window_start="2026-07-25T00:00:00",
+        window_end="2026-07-31T00:00:00",
+        transport=_authenticated_transport(handler),
+    )
+
+    assert result["result"]["aggregateType"] == "WORKFLOW_PROBLEM"
+
+
+@pytest.mark.asyncio
+async def test_workflow_feedback_report_derives_context_from_managed_bundle(monkeypatch: pytest.MonkeyPatch):
+    bundle = _managed_bundle()
+    monkeypatch.setattr(module, "load_proposal_for_submission", lambda *_: bundle)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert request.url.path == "/admin-api/cloudmold/ai-operations/workflow-evidence/feedback"
+        assert payload["workflowVersion"] == "1.0.1"
+        assert payload["feedbackType"] == "USER_FEEDBACK"
+        assert payload["status"] == "RECEIVED"
+        return httpx.Response(
+            200,
+            json={"code": 0, "data": {"aggregateType": "WORKFLOW_USER_FEEDBACK", "aggregateId": "wff-1"}},
+        )
+
+    result = await module._record_workflow_feedback(
+        runtime=_runtime(),
+        workflow_id="skill.cloudmold.inventory.stockout-diagnosis.v1",
+        proposal_id="proposal-aabbccddeeff0011",
+        source_type="USER_BEHAVIOR",
+        feedback_type="USER_FEEDBACK",
+        feedback_label="Skipped explanation",
+        feedback_text="The user skipped the explanatory branch and manually resolved the task.",
+        severity="LOW",
+        dqc_status="NOT_APPLICABLE",
+        status="RECEIVED",
+        observed_at="2026-07-31T10:30:00",
+        window_start="2026-07-25T00:00:00",
+        window_end="2026-07-31T00:00:00",
+        transport=_authenticated_transport(handler),
+    )
+
+    assert result["result"]["aggregateType"] == "WORKFLOW_USER_FEEDBACK"
